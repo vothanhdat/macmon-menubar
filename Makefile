@@ -67,7 +67,8 @@ dist: app
 	@[ -x "$(APP)/Contents/MacOS/macmon" ] || { echo "dist needs macmon to bundle: brew install macmon"; exit 1; }
 	@codesign --verify --deep --strict "$(APP)"
 	@mkdir -p $(DIST_DIR)
-	@ditto -c -k --keepParent "$(APP)" "$(DIST_ZIP).tmp" && mv -f "$(DIST_ZIP).tmp" "$(DIST_ZIP)"
+	@# No extended attributes: they become ._ files, which break the signature when unzipped with `unzip`.
+	@ditto -c -k --norsrc --noextattr --noacl --keepParent "$(APP)" "$(DIST_ZIP).tmp" && mv -f "$(DIST_ZIP).tmp" "$(DIST_ZIP)"
 	@echo "Built $(DIST_ZIP) ($$(du -h "$(DIST_ZIP)" | cut -f1))"
 	@shasum -a 256 "$(DIST_ZIP)"
 
