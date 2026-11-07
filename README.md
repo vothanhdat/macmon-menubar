@@ -31,6 +31,17 @@ Apple Silicon Mac, macOS 13 or newer. That's all for the download: macmon is inc
 
 ## Install
 
+### Homebrew
+
+```bash
+brew install --cask vothanhdat/tap/macmon-indicator
+```
+
+Then open **MacMon Indicator** and turn on **Settings… → Launch at login**. Update with
+`brew upgrade --cask macmon-indicator`; remove with `brew uninstall --cask macmon-indicator` (add
+`--zap` to also delete history and settings). The cask clears the quarantine flag for you, so there
+is no Gatekeeper prompt.
+
 ### Download
 
 1. Download `MacMon-Indicator-<version>.zip` from
@@ -189,6 +200,13 @@ its menu three times and prints footprint and RSS at fixed times after each clos
 `MACMON_DEBUG_MENU_HOLD` (seconds open, default 6) and `MACMON_DEBUG_MENU_GAP` (seconds between opens,
 default 60) adjust the timing. Add `MACMON_DEBUG_FAKE_DISPLAY_SLEEP=1` (and `MACMON_DEBUG_RESTART_DELAY=5`)
 to test the quiet restart: after the last cycle the app acts as if the displays went to sleep.
+
+**Releasing a new version:**
+1. Set `VERSION` in the Makefile.
+2. Run `make dist`.
+3. Publish the zip as a GitHub Release tagged `v<version>`.
+4. In [vothanhdat/homebrew-tap](https://github.com/vothanhdat/homebrew-tap), update `version` and
+   `sha256` in `Casks/macmon-indicator.rb` (`make dist` prints the checksum).
 
 ## License
 
