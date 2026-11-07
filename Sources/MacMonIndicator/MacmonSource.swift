@@ -20,6 +20,26 @@ final class MacmonSource {
 
     var hasBattery: Bool { sensors.hasBattery }
 
+    /// Version of the macmon in use ("0.11.0"), from `macmon --version`. Cached per path.
+    func version() -> String? {
+        guard let path = path ?? Self.locate(override: Settings.shared.macmonPath) else { return nil }
+        if let cached = cachedVersion, cached.path == path { return cached.version }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = ["--version"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        p.waitUntilExit()
+        // "macmon 0.11.0" -> "0.11.0"
+        let v = out.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ").last.map(String.init)
+        cachedVersion = (path, v)
+        return v
+    }
+    private var cachedVersion: (path: String, version: String?)?
+
     /// The path set in defaults (`macmonPath`), then the copy bundled next to the app's binary
     /// (the version the app was built and tested with), then the usual install locations.
     static func locate(override: String?) -> String? {

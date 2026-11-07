@@ -150,6 +150,53 @@ enum SnapshotMode {
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
     }
 
+    /// `--iconset <dir.iconset>`: the app icon as PNGs at every size macOS uses. `make app` turns
+    /// them into AppIcon.icns with `iconutil`.
+    static func writeIconset(to dir: String) {
+        _ = NSApplication.shared
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        for points in [16, 32, 128, 256, 512] {
+            for scale in [1, 2] {
+                let px = points * scale
+                guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8,
+                                                 samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { exit(1) }
+                rep.size = NSSize(width: px, height: px) // draw in pixels
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+                About.icon(size: CGFloat(px)).draw(in: NSRect(x: 0, y: 0, width: px, height: px))
+                NSGraphicsContext.restoreGraphicsState()
+                let name = scale == 1 ? "icon_\(points)x\(points).png" : "icon_\(points)x\(points)@2x.png"
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name)"))
+            }
+        }
+        exit(0)
+    }
+
+    /// `--about <dir>`: the About panel's contents, light and dark (about-light.png, about-dark.png).
+    static func aboutPreview(to dir: String) {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let version = MacmonSource().version()
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            About.show(macmonVersion: version)
+            guard let panel = app.windows.first(where: { $0.isVisible }), let view = panel.contentView else {
+                FileHandle.standardError.write("About panel did not open\n".data(using: .utf8)!)
+                exit(1)
+            }
+            panel.contentView = NSView() // take the content out of the panel to render it on its own
+            var bg = NSColor.windowBackgroundColor // resolve it in the target appearance
+            NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+                bg = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? bg
+            }
+            write(view, appearance: appearance, background: bg, padding: 0, to: "\(dir)/about-\(name).png")
+            panel.close()
+        }
+        print("Wrote \(dir)/about-light.png and about-dark.png")
+        exit(0)
+    }
+
     // MARK: - Menu bar look previews
 
     /// `--bar-previews <file.png>`: a sheet of menu bar looks (text size × spacing, plus opacity),

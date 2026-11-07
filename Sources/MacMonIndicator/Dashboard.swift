@@ -51,7 +51,7 @@ final class DashboardMenu {
     }
 
     /// Items for the status menu, top to bottom.
-    func items(status: String?, target: AnyObject, settings: Selector, quit: Selector) -> [NSMenuItem] {
+    func items(status: String?, target: AnyObject, about: Selector, settings: Selector, quit: Selector) -> [NSMenuItem] {
         let chartsItem = NSMenuItem()
         chartsItem.view = top
         let procItem = NSMenuItem()
@@ -61,11 +61,13 @@ final class DashboardMenu {
             statusItem.title = status
             items.append(statusItem)
         }
+        let a = NSMenuItem(title: "About MacMon Indicator", action: about, keyEquivalent: "")
+        a.target = target
         let s = NSMenuItem(title: "Settings…", action: settings, keyEquivalent: ",")
         s.target = target
         let q = NSMenuItem(title: "Quit MacMon Indicator", action: quit, keyEquivalent: "q")
         q.target = target
-        items += [s, q]
+        items += [a, s, q]
         return items
     }
 

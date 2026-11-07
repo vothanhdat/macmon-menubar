@@ -170,7 +170,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboard = d
         // Only mention macmon when something is wrong.
         let problem = (macmon.state == .notFound || macmon.state == .failed) ? macmonStatusText() : nil
-        menu.items = d.items(status: problem, target: self, settings: #selector(openSettings), quit: #selector(quit))
+        menu.items = d.items(status: problem, target: self, about: #selector(openAbout),
+                             settings: #selector(openSettings), quit: #selector(quit))
     }
 
     /// Applies the desired macmon interval after a delay; a newer call replaces an older one.
@@ -211,7 +212,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // MARK: - Settings, export, quit
+    // MARK: - About, settings, export, quit
+
+    @objc private func openAbout() {
+        activate()
+        About.show(macmonVersion: macmon.version())
+    }
 
     @objc private func openSettings() {
         if settingsWindow == nil {

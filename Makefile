@@ -1,7 +1,7 @@
 APP_NAME   := MacMon Indicator
 EXEC       := MacMonIndicator
 BUNDLE_ID  ?= local.MacMonIndicator
-VERSION    ?= 0.1.0
+VERSION    ?= 0.1.1
 BUILD_DIR  := build
 APP        := $(BUILD_DIR)/$(APP_NAME).app
 PREFIX     ?= /Applications
@@ -25,6 +25,10 @@ app: $(BUILD_DIR)/$(HELPER)
 	@mkdir -p "$(APP)/Contents/MacOS"
 	@cp "$$(swift build -c release --arch arm64 --show-bin-path)/$(EXEC)" "$(APP)/Contents/MacOS/$(EXEC)"
 	@cp $(BUILD_DIR)/$(HELPER) "$(APP)/Contents/MacOS/$(HELPER)"
+	@# The app icon is drawn in code (About.icon); render it at every size and pack it as .icns.
+	@mkdir -p "$(APP)/Contents/Resources"
+	@"$(APP)/Contents/MacOS/$(EXEC)" --iconset "$(BUILD_DIR)/AppIcon.iconset"
+	@iconutil -c icns "$(BUILD_DIR)/AppIcon.iconset" -o "$(APP)/Contents/Resources/AppIcon.icns"
 	@sed -e 's/__BUNDLE_ID__/$(BUNDLE_ID)/' -e 's/__VERSION__/$(VERSION)/g' Resources/Info.plist > "$(APP)/Contents/Info.plist"
 	@codesign --force --sign - "$(APP)/Contents/MacOS/$(HELPER)"
 	@# Bundle macmon (MIT) so the app also works on Macs without Homebrew. Without a bundled

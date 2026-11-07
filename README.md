@@ -1,4 +1,4 @@
-# MacMon Indicator
+# <img src="docs/icon.png" width="40" align="top" alt=""> MacMon Indicator
 
 A tiny macOS menu bar monitor for Apple Silicon: CPU, GPU, RAM, power, battery, temperature,
 fans and disk, with up to 30 days of history and a top-processes list. Sensor data comes from
@@ -73,7 +73,7 @@ Other commands: `make app` (build only, into `build/`), `make run`, `make uninst
 
 ## Using it
 
-- **Click** (left or right): the menu with charts, top processes, **Settings… (⌘,)** and **Quit (⌘Q)**.
+- **Click** (left or right): the menu with charts, top processes, **About**, **Settings… (⌘,)** and **Quit (⌘Q)**. About shows the version and the macmon version in use.
 - **Settings**: menu bar slots, icons, one or two lines, text size, spacing, edge padding and opacity
   (the menu bar updates live while you drag), menu charts (which, order, columns, value position), update interval (on power / on battery), warning limits, launch at
   login, free memory while the display sleeps, root mode, CSV export.
@@ -190,6 +190,8 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 make app                                                          # build into build/
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --snapshot out --demo   # render UI to PNGs
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --bar-previews looks.png # menu bar look sheet
+"build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --about out             # About panel, light + dark
+"build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --iconset i.iconset     # app icon PNGs (make app builds AppIcon.icns from them)
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --layout-previews l.png  # chart layout sheet
 ./build/macmon-indicator-helper --stdout | head                   # helper output (your processes)
 ```
