@@ -128,6 +128,10 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 - **Temperatures** are macmon's CPU/GPU averages. **Power** "System" is the whole machine.
 - **Battery** is + when charging and − when discharging.
 - **Disk** totals include every block device (internal and external).
+- **Chart scales**: CPU and GPU use 0–100%, Temp 0–100°, RAM 0 to total, and Power, Battery and Disk
+  0 to the highest value in view. Turn on **Settings → Zoom Temp and RAM** to scale those two to
+  the range their data covers. Small labels then show the highest and lowest values in view. A
+  dashed red line marks your warning limit whenever it falls inside the visible range.
 
 ## Troubleshooting
 

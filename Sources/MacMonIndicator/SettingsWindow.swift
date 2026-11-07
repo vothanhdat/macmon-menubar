@@ -12,6 +12,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var chartPopups: [NSPopUpButton] = []
     private let columnsPopup = NSPopUpButton()
     private let valuePopup = NSPopUpButton()
+    private let zoomBox = NSButton(checkboxWithTitle: "Zoom Temp and RAM", target: nil, action: nil)
     private static let valueTitles: [(ChartLayout.Value, String)] = [
         (.split, "Main value in chart, details on label row"), (.chart, "Value in chart"), (.label, "Value on label row"),
     ]
@@ -111,7 +112,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         columnsPopup.selectItem(at: layout.columns - 1)
         valuePopup.selectItem(at: Self.valueTitles.firstIndex { $0.0 == layout.value } ?? 0)
-        let chartOptions = NSStackView(views: [columnsPopup, valuePopup])
+        zoomBox.state = s.zoomCharts ? .on : .off
+        zoomBox.target = self
+        zoomBox.action = #selector(zoomChanged)
+        zoomBox.toolTip = "Scale the Temp and RAM charts to the range of their data, so small changes are visible."
+        let chartOptions = NSStackView(views: [columnsPopup, valuePopup, zoomBox])
         chartOptions.spacing = 8
 
         iconsBox.state = s.showIcons ? .on : .off
@@ -241,6 +246,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             p.indexOfSelectedItem > 0 ? ChartID.allCases[p.indexOfSelectedItem - 1] : nil
         }
     }
+
+    @objc private func zoomChanged() { s.zoomCharts = zoomBox.state == .on }
 
     @objc private func chartLayoutChanged() {
         s.chartLayout = ChartLayout(columns: columnsPopup.indexOfSelectedItem + 1,

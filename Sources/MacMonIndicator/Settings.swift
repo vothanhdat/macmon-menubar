@@ -20,6 +20,7 @@ final class Settings {
             "chartIDs": ChartID.allCases.map(\.rawValue),
             "chartColumns": 2,
             "chartValue": ChartLayout.Value.split.rawValue,
+            "zoomCharts": false,
             "intervalAC": 2000,
             "intervalBattery": 5000,
             "warnCPU": 90.0,
@@ -62,6 +63,11 @@ final class Settings {
     var chartIDs: [ChartID] {
         get { (d.stringArray(forKey: "chartIDs") ?? []).compactMap(ChartID.init(rawValue:)) }
         set { d.set(newValue.map(\.rawValue), forKey: "chartIDs"); notify() }
+    }
+    /// Zoom the Temp and RAM charts to the range their data covers (off: fixed 0–100° / 0–total).
+    var zoomCharts: Bool {
+        get { d.bool(forKey: "zoomCharts") }
+        set { d.set(newValue, forKey: "zoomCharts"); notify() }
     }
     var chartLayout: ChartLayout {
         get {
