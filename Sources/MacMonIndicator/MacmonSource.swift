@@ -20,9 +20,14 @@ final class MacmonSource {
 
     var hasBattery: Bool { sensors.hasBattery }
 
+    /// The path set in defaults (`macmonPath`), then the copy bundled next to the app's binary
+    /// (the version the app was built and tested with), then the usual install locations.
     static func locate(override: String?) -> String? {
         var candidates: [String] = []
         if let o = override, !o.isEmpty { candidates.append(o) }
+        if let dir = Bundle.main.executableURL?.deletingLastPathComponent() {
+            candidates.append(dir.appendingPathComponent("macmon").path)
+        }
         candidates += ["/opt/homebrew/bin/macmon", "/usr/local/bin/macmon", NSHomeDirectory() + "/.cargo/bin/macmon"]
         if let p = ProcessInfo.processInfo.environment["PATH"] {
             candidates += p.split(separator: ":").map { "\($0)/macmon" }

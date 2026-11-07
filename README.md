@@ -27,11 +27,27 @@ _Screenshots use demo history and demo process names._
 
 ## Requirements
 
-- Apple Silicon Mac, macOS 13 or newer
-- `macmon`: `brew install macmon`
-- Xcode Command Line Tools (`xcode-select --install`). Full Xcode is not needed.
+Apple Silicon Mac, macOS 13 or newer. That's all for the download: macmon is included in the app.
 
 ## Install
+
+### Download
+
+1. Download `MacMon-Indicator-<version>.zip` from
+   [Releases](https://github.com/vothanhdat/macmon-menubar/releases/latest), unzip it, and move
+   **MacMon Indicator.app** to `/Applications`.
+2. The app isn't notarized (that needs a paid Apple Developer ID), so macOS blocks a downloaded copy
+   the first time. Either run this once:
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/MacMon Indicator.app"
+   ```
+   or open the app, then click **Open Anyway** in System Settings → Privacy & Security.
+3. Open it, then turn on **Settings… → Launch at login**.
+
+### Build from source
+
+Needs Xcode Command Line Tools (`xcode-select --install`; full Xcode is not needed) and
+`brew install macmon`, which gets bundled into the app.
 
 ```bash
 git clone https://github.com/vothanhdat/macmon-menubar.git && cd macmon-menubar
@@ -41,7 +57,8 @@ make install
 This builds the app and copies it to `/Applications`. Because you build it yourself, macOS does not
 show the "unidentified developer" warning. Then open **Settings… → Launch at login**.
 
-Other commands: `make app` (build only, into `build/`), `make run`, `make uninstall`, `make clean`.
+Other commands: `make app` (build only, into `build/`), `make run`, `make uninstall`, `make clean`,
+`make dist` (the release zip, in `dist/`).
 
 ## Using it
 
@@ -149,7 +166,9 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 
 ## Troubleshooting
 
-- **Values show "–"**: macmon isn't running. The menu shows a line explaining why. Install it with `brew install macmon`.
+- **Values show "–"**: macmon isn't running. The menu shows a line explaining why. The app uses its
+  bundled macmon (`Contents/MacOS/macmon`) when it has one, otherwise one from Homebrew
+  (`brew install macmon`). To use another copy: `defaults write local.MacMonIndicator macmonPath /path/to/macmon`.
 - **Log**: `/usr/bin/log show --last 1h --predicate 'subsystem == "local.MacMonIndicator"'`
   (macmon starts and exits, sleep and wake).
 - **Reset history**: quit the app and delete `~/Library/Application Support/MacMonIndicator/history.bin`.
@@ -173,4 +192,5 @@ to test the quiet restart: after the last cycle the app acts as if the displays 
 
 ## License
 
-MIT. Uses [macmon](https://github.com/vladkens/macmon) (MIT) as a separate program.
+MIT. The app bundles [macmon](https://github.com/vladkens/macmon) (MIT, © vladkens; its license is in
+`Contents/Resources/macmon-LICENSE`) and runs it as a separate program.
