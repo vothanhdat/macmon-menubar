@@ -48,7 +48,7 @@ Other commands: `make app` (build only, into `build/`), `make run`, `make uninst
 - **Click** (left or right): the menu with charts, top processes, **Settings… (⌘,)** and **Quit (⌘Q)**.
 - **Settings**: menu bar slots, icons, one or two lines, text size, spacing, edge padding and opacity
   (the menu bar updates live while you drag), menu charts (which, order, columns, value position), update interval (on power / on battery), warning limits, launch at
-  login, root mode, CSV export.
+  login, free memory while the display sleeps, root mode, CSV export.
 
 ## Resource use
 
@@ -56,15 +56,22 @@ Measured on a MacBook Pro M4 Pro, on battery, 5 s interval, menu closed:
 
 | Process | CPU (% of one core) | Memory (footprint) |
 |---|---|---|
-| MacMon Indicator | 0.2–0.4% | 15 MB (about 34 MB once the menu has been opened) |
+| MacMon Indicator | 0.2–0.4% | 11 MB (about 20 MB once the menu has been opened) |
 | macmon | 0.30% | 11 MB |
-| **Total** | **~0.5–0.7%** | **~26–45 MB** |
+| **Total** | **~0.5–0.7%** | **~22–31 MB** |
 
 At the default 2 s interval on power, expect roughly twice the CPU. While the menu is open it
-samples every second and scans processes every 2 s. macOS also uses about 110 MB of graphics memory
+samples every second and scans processes every 2 s. macOS also uses up to ~170 MB of graphics memory
 for the menu's glass window and frees it 20 to 40 s after the menu closes. The first time the menu is
-drawn, macOS loads the frameworks it needs (the glass effect, symbol rendering), which adds about 19 MB
-that stays. It doesn't grow on later opens, and all of the app's own menu objects are freed on close.
+drawn, macOS sets up the menu machinery (the glass effect, layout, fonts), which adds a few MB that
+stay. It doesn't grow on later opens, and all of the app's own menu objects are freed on close.
+
+**Footprint vs RSS.** Activity Monitor's *Memory* column (and the app's own process list) shows the
+footprint: memory that belongs to this app alone. `htop` and `ps` show RSS, which also counts pages of
+shared system frameworks and files the app has touched; those pages are shared with every other app.
+RSS is about 73 MB at launch and about 100 MB after the menu has been shown. It doesn't go down
+when the menu closes, because those pages stay mapped until macOS needs the memory back. Only a new
+process gives them back, so the app restarts itself quietly while the displays sleep (see below).
 
 How it stays small:
 
@@ -80,6 +87,13 @@ How it stays small:
   10 s while the displays sleep, stopped during system sleep. Changes are debounced: sweeping the
   mouse along the menu bar opens and closes menus, and that doesn't restart macmon.
 - **Process scanning runs only while the menu is open.**
+- **Space-efficient malloc.** The app's Info.plist sets `MallocSpaceEfficient=1`, so freed memory
+  goes back to macOS instead of staying cached in the app: about 3 MB less at launch and up to 18 MB
+  less after the menu has been shown.
+- **Quiet restart.** When the menu has made the app at least 12 MB bigger (RSS) and the displays
+  have been asleep for a minute, the app saves its history, launches a fresh copy of itself and
+  quits. Nobody sees the menu bar item go and come back, and memory returns to launch level
+  (about 11 MB footprint, 75 MB RSS). Turn it off with **Settings → Free memory while the display sleeps**.
 - **History is one fixed-size memory-mapped file** (~214 KB, never grows). Writing a sample is just a
   memory write, and the file is flushed once a minute.
 
@@ -149,6 +163,13 @@ make app                                                          # build into b
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --layout-previews l.png  # chart layout sheet
 ./build/macmon-indicator-helper --stdout | head                   # helper output (your processes)
 ```
+
+To measure memory the same way each time, run the binary with `MACMON_DEBUG_MENU_CYCLES=3`
+(and `MallocSpaceEfficient=1`, which `open` would set from the Info.plist). The app opens and closes
+its menu three times and prints footprint and RSS at fixed times after each close.
+`MACMON_DEBUG_MENU_HOLD` (seconds open, default 6) and `MACMON_DEBUG_MENU_GAP` (seconds between opens,
+default 60) adjust the timing. Add `MACMON_DEBUG_FAKE_DISPLAY_SLEEP=1` (and `MACMON_DEBUG_RESTART_DELAY=5`)
+to test the quiet restart: after the last cycle the app acts as if the displays went to sleep.
 
 ## License
 

@@ -28,6 +28,7 @@ final class Settings {
             "warnRAM": 90.0,
             "warnTemp": 90.0,
             "useRootHelper": false,
+            "quietRestart": true,
         ])
     }
 
@@ -109,6 +110,11 @@ final class Settings {
         }
     }
     /// Read system processes through the root helper (only if it is installed).
+    /// Restart while the displays sleep to give back memory the menu left behind (see AppDelegate).
+    var quietRestart: Bool {
+        get { d.bool(forKey: "quietRestart") }
+        set { d.set(newValue, forKey: "quietRestart") }
+    }
     var useRootHelper: Bool {
         get { d.bool(forKey: "useRootHelper") }
         set { d.set(newValue, forKey: "useRootHelper"); notify() }

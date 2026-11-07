@@ -20,6 +20,13 @@
     <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>LSEnvironment</key>
+    <dict>
+        <!-- malloc's space-efficient mode returns freed pages to macOS: about 3 MB less at
+             launch and up to 18 MB less after the menu has been shown. -->
+        <key>MallocSpaceEfficient</key>
+        <string>1</string>
+    </dict>
     <key>LSArchitecturePriority</key>
     <array>
         <string>arm64</string>
