@@ -27,10 +27,20 @@ struct ChartLayout: Equatable {
     }
     var columns = 2
     var value: Value = .split
+    /// Height of each chart in points; nil uses the default for the column count.
+    var height: CGFloat?
+
+    static let heightRange: ClosedRange<CGFloat> = 20...90
+    var chartHeight: CGFloat { height ?? (columns == 1 ? 25 : 30) }
 }
 
 /// All charts drawn in one view. Each cell is a label row above a filled bar chart (avg solid,
-/// max faint). Cells flow into 1 or 2 columns. Hovering shows the values at that moment in every cell.
+/// max faint). Cells flow into 1 or 2 columns. Hovering shows the values at that moment in every
+/// cell; clicking a chart shows it alone at full size, and another click goes back to the grid.
+///
+/// The bars change only when data arrives (once a second while the menu is open), but the pointer
+/// can move 120 times a second. So the cursor and the values live in a separate overlay layer, and
+/// moving the pointer redraws only the small parts of it that change, never the bars.
 final class ChartsView: NSView {
     /// `smart` zooms to the range the data actually covers (at least `minSpan` wide), for slow
     /// metrics like temperature and RAM. It only applies when "Zoom Temp and RAM" is on in
@@ -39,7 +49,7 @@ final class ChartsView: NSView {
     enum Shape { case up, mirrored(Series), signed }
 
     struct Row {
-        let title: String
+        let id: ChartID
         let series: Series
         let shape: Shape
         let scale: Scale
@@ -47,14 +57,16 @@ final class ChartsView: NSView {
         let color2: NSColor?
         /// Main value (e.g. "9.1W") and optional details (e.g. "CPU 0.9 · GPU 0.2").
         let text: (_ value: (Series) -> Float, _ live: Sample?) -> (main: String, detail: String?)
-        /// Formats the min/max labels shown on smart-scaled charts.
+        /// Formats axis labels: the data's min/max on smart-scaled charts, the scale on a zoomed chart.
         private(set) var axisLabel: ((Float) -> String)?
         /// Warning limit drawn as a dashed line when it falls inside the visible range.
         private(set) var limit: ((Thresholds, Sample?) -> Float?)?
 
-        init(title: String, series: Series, shape: Shape, scale: Scale, color: NSColor, color2: NSColor?,
+        var title: String { id.title }
+
+        init(id: ChartID, series: Series, shape: Shape, scale: Scale, color: NSColor, color2: NSColor?,
              text: @escaping (_ value: (Series) -> Float, _ live: Sample?) -> (main: String, detail: String?)) {
-            self.title = title; self.series = series; self.shape = shape; self.scale = scale
+            self.id = id; self.series = series; self.shape = shape; self.scale = scale
             self.color = color; self.color2 = color2; self.text = text
         }
 
@@ -68,48 +80,125 @@ final class ChartsView: NSView {
 
     private static let inset = DashboardMenu.inset, colGap: CGFloat = 10
     private static let titleH: CGFloat = 12, chartGap: CGFloat = 1, cellGap: CGFloat = 5
-    private static func chartH(_ layout: ChartLayout) -> CGFloat { layout.columns == 1 ? 25 : 30 }
-    private static func cellH(_ layout: ChartLayout) -> CGFloat { titleH + chartGap + chartH(layout) + cellGap }
+    /// A zoomed chart takes the grid's place, and is at least this tall.
+    private static let minZoomedHeight: CGFloat = 150
+    private static func cellH(_ layout: ChartLayout) -> CGFloat { titleH + chartGap + layout.chartHeight + cellGap }
 
-    /// Height needed for `count` charts.
-    static func height(count: Int, layout: ChartLayout) -> CGFloat {
+    /// Height needed for `count` charts, or for one zoomed chart in their place.
+    static func height(count: Int, layout: ChartLayout, zoomed: Bool = false) -> CGFloat {
         let rows = (count + layout.columns - 1) / max(1, layout.columns)
-        return CGFloat(rows) * cellH(layout) - cellGap + 2
+        let grid = CGFloat(rows) * cellH(layout) - cellGap + 2
+        return zoomed ? max(grid, minZoomedHeight) : grid
     }
 
-    var rows: [Row] = [] { didSet { needsDisplay = true } }
-    var layout = ChartLayout() { didSet { needsDisplay = true } }
-    var tier = 0 { didSet { needsDisplay = true } }
-    var latest: Sample? { didSet { needsDisplay = true } }
+    var rows: [Row] = [] {
+        didSet {
+            if let z = zoomed, !rows.contains(where: { $0.id == z }) { zoomed = nil }
+            contentChanged()
+        }
+    }
+    var layout = ChartLayout() { didSet { contentChanged() } }
+    var tier = 0 { didSet { contentChanged() } }
+    var latest: Sample? { didSet { contentChanged() } }
     var history: HistoryStore?
     var onHover: ((TimeInterval?) -> Void)?
+    /// Called after a click zooms in or out; the view's height needs updating then.
+    var onZoom: (() -> Void)?
 
+    /// The chart shown alone at full size, or nil for the grid.
+    private(set) var zoomed: ChartID? {
+        didSet {
+            guard zoomed != oldValue else { return }
+            hoverIndex = nil
+            contentChanged()
+            onZoom?()
+        }
+    }
+
+    /// Bucket under the pointer: its x position scaled to the bucket count, no searching.
     private var hoverIndex: Int? {
         didSet {
             guard hoverIndex != oldValue else { return }
-            needsDisplay = true
-            let now = Date().timeIntervalSince1970
-            onHover?(hoverIndex.flatMap { history?.bucketStart(tier: tier, index: $0, now: now) })
+            updateCursors()
+            scheduleHoverValues()
         }
     }
+    /// The cursor follows every pointer move; the values (and the time) at most 30 times a second,
+    /// since text changing faster can't be read anyway. The last move always shows.
+    private var lastHoverValues: CFTimeInterval = 0
+    private var hoverValuesTimer: Timer?
+    private let overlay = Overlay()
     private var avgBuf: [Float] = [], maxBuf: [Float] = [], avgBuf2: [Float] = [], maxBuf2: [Float] = []
-    private var zoom = false // Settings.zoomCharts, read once per draw
+    private var fitScale = false // Settings.zoomCharts, read once per draw
     private let titleFont = NSFont.systemFont(ofSize: 10, weight: .medium)
-    private let labelValueFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-    private let chipFont = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .medium)
     private let axisFont = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .regular)
+    private let mainAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
+                                                            .foregroundColor: NSColor.labelColor]
+    private let detailAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
+                                                              .foregroundColor: NSColor.secondaryLabelColor]
+    private let chipAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .medium),
+                                                            .foregroundColor: NSColor.labelColor]
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        overlay.frame = bounds
+        overlay.autoresizingMask = [.width, .height]
+        addSubview(overlay)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
 
     override var isFlipped: Bool { true }
 
-    private var cellW: CGFloat {
-        let cols = CGFloat(max(1, layout.columns))
-        return (bounds.width - Self.inset * 2 - Self.colGap * (cols - 1)) / cols
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateOverlay()
     }
 
-    private func cellOrigin(_ i: Int) -> CGPoint {
-        let col = i % max(1, layout.columns), row = i / max(1, layout.columns)
-        return CGPoint(x: Self.inset + CGFloat(col) * (cellW + Self.colGap), y: CGFloat(row) * Self.cellH(layout))
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateOverlay()
     }
+
+    private func contentChanged() {
+        needsDisplay = true
+        updateOverlay()
+    }
+
+    // MARK: - Geometry
+
+    /// One chart on screen: its label row starts at `origin`, its bars fill `chart`.
+    fileprivate struct Cell {
+        let row: Row
+        let origin: CGPoint
+        let chart: CGRect
+        /// Everything that belongs to this chart, for clicks.
+        var frame: CGRect { CGRect(x: origin.x, y: origin.y, width: chart.width, height: chart.maxY - origin.y) }
+    }
+
+    /// The grid, or only the zoomed chart filling the view.
+    fileprivate func cells() -> [Cell] {
+        let top = Self.titleH + Self.chartGap
+        if let z = zoomed, let row = rows.first(where: { $0.id == z }) {
+            let w = bounds.width - Self.inset * 2
+            return [Cell(row: row, origin: CGPoint(x: Self.inset, y: 0),
+                         chart: CGRect(x: Self.inset, y: top, width: w, height: bounds.height - top - 2))]
+        }
+        let cols = max(1, layout.columns)
+        let w = (bounds.width - Self.inset * 2 - Self.colGap * CGFloat(cols - 1)) / CGFloat(cols)
+        return rows.enumerated().map { i, row in
+            let o = CGPoint(x: Self.inset + CGFloat(i % cols) * (w + Self.colGap), y: CGFloat(i / cols) * Self.cellH(layout))
+            return Cell(row: row, origin: o, chart: CGRect(x: o.x, y: o.y + top, width: w, height: layout.chartHeight))
+        }
+    }
+
+    /// The hover cursor of bucket `h`.
+    fileprivate func cursorRect(_ c: Cell, _ h: Int) -> CGRect {
+        let bw = c.chart.width / CGFloat(HistoryStore.tiers[tier].capacity)
+        return CGRect(x: c.chart.minX + (CGFloat(h) + 0.5) * bw - 0.5, y: c.chart.minY - 1, width: 1, height: c.chart.height + 2)
+    }
+
+    // MARK: - Mouse
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -122,34 +211,47 @@ final class ChartsView: NSView {
         let p = convert(event.locationInWindow, from: nil)
         let cap = HistoryStore.tiers[tier].capacity
         // All charts share one time axis, so only the x position within a column matters.
-        for col in 0..<max(1, layout.columns) {
-            let x0 = Self.inset + CGFloat(col) * (cellW + Self.colGap)
-            if p.x >= x0 && p.x < x0 + cellW {
-                hoverIndex = min(cap - 1, max(0, Int((p.x - x0) / cellW * CGFloat(cap))))
-                return
-            }
-        }
-        hoverIndex = nil
+        hoverIndex = cells().first { p.x >= $0.chart.minX && p.x < $0.chart.maxX }
+            .map { min(cap - 1, max(0, Int((p.x - $0.chart.minX) / $0.chart.width * CGFloat(cap)))) }
     }
 
     override func mouseExited(with event: NSEvent) { hoverIndex = nil }
 
+    // Menus deliver mouseUp to custom item views and stay open.
+    override func mouseUp(with event: NSEvent) {
+        if zoomed != nil {
+            zoomed = nil
+        } else {
+            let p = convert(event.locationInWindow, from: nil)
+            guard let c = cells().first(where: { $0.frame.contains(p) }) else { return }
+            zoomed = c.row.id
+        }
+        mouseMoved(with: event) // the cursor at the pointer, in the new layout
+    }
+
+    // MARK: - Drawing
+
+    /// Draw count and time, collected while MemoryProbe is on (see MenuCycler).
+    static var drawStats = (count: 0, seconds: 0.0)
+
+    /// The bars, scale and titles. The overlay shows the rest, except offscreen (snapshots), where
+    /// there are no layers: then the values are drawn here too.
     override func draw(_ dirtyRect: NSRect) {
+        let t0 = MemoryProbe.enabled ? CACurrentMediaTime() : 0
+        defer { if MemoryProbe.enabled { Self.drawStats.count += 1; Self.drawStats.seconds += CACurrentMediaTime() - t0 } }
         guard let ctx = NSGraphicsContext.current?.cgContext, let history else { return }
         let now = Date().timeIntervalSince1970
         let cap = HistoryStore.tiers[tier].capacity
-        let w = cellW
-        let bw = w / CGFloat(cap)
-        let chartH = Self.chartH(layout)
         let thresholds = Settings.shared.thresholds
-        zoom = Settings.shared.zoomCharts
+        fitScale = Settings.shared.zoomCharts
+        let isZoomed = zoomed != nil, offscreen = window == nil
 
-        for (i, row) in rows.enumerated() {
-            let o = cellOrigin(i)
-            let rect = CGRect(x: o.x, y: o.y + Self.titleH + Self.chartGap, width: w, height: chartH)
+        for c in cells() {
+            let row = c.row, rect = c.chart
+            let bw = rect.width / CGFloat(cap)
 
-            // Label row.
-            (row.title as NSString).draw(at: NSPoint(x: o.x, y: o.y - 1), withAttributes: [.font: titleFont, .foregroundColor: NSColor.secondaryLabelColor])
+            (row.title as NSString).draw(at: NSPoint(x: c.origin.x, y: c.origin.y - 1),
+                                         withAttributes: [.font: titleFont, .foregroundColor: NSColor.secondaryLabelColor])
 
             // Chart: rounded track tinted with the chart's color; everything below is clipped to it.
             ctx.saveGState()
@@ -185,66 +287,177 @@ final class ChartsView: NSView {
                 ctx.setLineDash(phase: 0, lengths: [])
             }
 
-            // Smart-scaled charts don't start at zero, so show what the top and bottom mean.
-            if let fmt = row.axisLabel, r.dataMin.isFinite, r.dataMax.isFinite {
-                let a: [NSAttributedString.Key: Any] = [.font: axisFont, .foregroundColor: NSColor.secondaryLabelColor]
-                (fmt(r.dataMax) as NSString).draw(at: NSPoint(x: rect.minX + 3, y: rect.minY), withAttributes: a)
-                let low = fmt(r.dataMin) as NSString
+            // Axis labels: smart-scaled charts don't start at zero, so they show what the top and
+            // bottom mean; a zoomed chart shows its scale.
+            var top: String?, bottom: String?
+            if let fmt = row.axisLabel {
+                if r.dataMin.isFinite, r.dataMax.isFinite {
+                    top = fmt(r.dataMax); bottom = fmt(r.dataMin)
+                } else if isZoomed {
+                    top = fmt(r.hi)
+                    switch row.shape {
+                    case .up: break
+                    case .signed: bottom = fmt(-r.hi)
+                    case .mirrored: bottom = fmt(r.hi)
+                    }
+                }
+            }
+            let a: [NSAttributedString.Key: Any] = [.font: axisFont, .foregroundColor: NSColor.secondaryLabelColor]
+            (top as NSString?)?.draw(at: NSPoint(x: rect.minX + 3, y: rect.minY), withAttributes: a)
+            if let low = bottom as NSString? {
                 low.draw(at: NSPoint(x: rect.minX + 3, y: rect.maxY - low.size(withAttributes: a).height), withAttributes: a)
             }
             ctx.restoreGState()
 
-            if let h = hoverIndex {
-                ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.6).cgColor)
-                ctx.fill(CGRect(x: rect.minX + (CGFloat(h) + 0.5) * bw - 0.5, y: rect.minY - 1, width: 1, height: rect.height + 2))
+            if offscreen {
+                let v = values(row, now: now)
+                if let line = labelLine(v, c) { drawLabel(v, line) }
+                if let chip = v.chip { drawChip(chip, at: chipRect(chip, in: rect)) }
             }
-
-            // Values: live, or at the hovered moment.
-            let t: (main: String, detail: String?)
-            if let h = hoverIndex {
-                t = row.text({ history.value(tier: self.tier, series: $0, index: h, now: now) }, nil)
-            } else {
-                let live = latest
-                t = row.text({ live?.value($0) ?? .nan }, live)
-            }
-            var chipText: String?, labelMain: String?, labelDetail: String?
-            switch layout.value {
-            case .chart: chipText = [t.main, t.detail].compactMap { $0 }.joined(separator: " · ")
-            case .label: labelMain = t.main; labelDetail = t.detail
-            case .split: chipText = t.main; labelDetail = t.detail
-            }
-            drawLabelValue(main: labelMain, detail: labelDetail, rightX: o.x + w, y: o.y)
-            if let chipText { drawChip(chipText, in: rect, ctx: ctx) }
         }
     }
 
-    /// Right-aligned on the label row: main value in the label color, details dimmer before it.
-    private func drawLabelValue(main: String?, detail: String?, rightX: CGFloat, y: CGFloat) {
-        var x = rightX
-        if let main {
-            let a: [NSAttributedString.Key: Any] = [.font: labelValueFont, .foregroundColor: NSColor.labelColor]
-            let s = main as NSString
-            x -= s.size(withAttributes: a).width
-            s.draw(at: NSPoint(x: x, y: y - 0.5), withAttributes: a)
-            x -= 6
+    // MARK: - Cursor and values
+
+    /// The value texts of one chart, placed as the layout setting says.
+    fileprivate struct Values: Equatable {
+        var labelMain: String?, labelDetail: String?, chip: String?
+    }
+
+    /// Values at the hovered moment, or live.
+    private func values(_ row: Row, now: TimeInterval) -> Values {
+        let t: (main: String, detail: String?)
+        if let h = hoverIndex, let history {
+            t = row.text({ history.value(tier: self.tier, series: $0, index: h, now: now) }, nil)
+        } else {
+            let live = latest
+            t = row.text({ live?.value($0) ?? .nan }, live)
         }
-        if let detail {
-            let a: [NSAttributedString.Key: Any] = [.font: labelValueFont, .foregroundColor: NSColor.secondaryLabelColor]
-            let s = detail as NSString
-            x -= s.size(withAttributes: a).width
-            s.draw(at: NSPoint(x: x, y: y - 0.5), withAttributes: a)
+        switch layout.value {
+        case .chart: return Values(chip: [t.main, t.detail].compactMap { $0 }.joined(separator: " · "))
+        case .label: return Values(labelMain: t.main, labelDetail: t.detail)
+        case .split: return Values(labelDetail: t.detail, chip: t.main)
         }
     }
 
-    /// Small value chip in the chart's bottom-right corner, translucent so bars still show around it.
-    private func drawChip(_ text: String, in rect: CGRect, ctx: CGContext) {
-        let a: [NSAttributedString.Key: Any] = [.font: chipFont, .foregroundColor: NSColor.labelColor]
-        let size = (text as NSString).size(withAttributes: a)
-        let chip = CGRect(x: rect.maxX - size.width - 8, y: rect.maxY - size.height - 3, width: size.width + 6, height: size.height + 1)
+    private func scheduleHoverValues() {
+        guard hoverValuesTimer == nil else { return }
+        let wait = lastHoverValues + 1.0 / 30 - CACurrentMediaTime()
+        guard wait > 0 else { showHoverValues(); return }
+        let t = Timer(timeInterval: wait, repeats: false) { [weak self] _ in
+            self?.hoverValuesTimer = nil
+            self?.showHoverValues()
+        }
+        RunLoop.main.add(t, forMode: .common) // also while the menu tracks the mouse
+        hoverValuesTimer = t
+    }
+
+    private func showHoverValues() {
+        lastHoverValues = CACurrentMediaTime()
+        updateOverlay()
+        let now = Date().timeIntervalSince1970
+        onHover?(hoverIndex.flatMap { history?.bucketStart(tier: tier, index: $0, now: now) })
+    }
+
+    private func updateCursors() {
+        guard window != nil else { return }
+        for (c, l) in zip(cells(), overlay.cells) {
+            if let h = hoverIndex { l.cursor.frame = cursorRect(c, h) }
+            l.cursor.isHidden = hoverIndex == nil
+        }
+    }
+
+    /// Moves the cursors and redraws the value texts that changed, all in plain layers (see
+    /// TextLayer.swift for why). The layers show the changes with the next screen refresh.
+    private func updateOverlay() {
+        // Offscreen (snapshots) there are no layers to show; draw(_:) draws the values then.
+        overlay.isHidden = window == nil
+        guard window != nil else { return }
+        let cs = cells(), now = Date().timeIntervalSince1970
+        overlay.prepare(count: cs.count)
+        for (c, l) in zip(cs, overlay.cells) {
+            if let h = hoverIndex { l.cursor.frame = cursorRect(c, h) }
+            l.cursor.isHidden = hoverIndex == nil
+            let v = values(c.row, now: now)
+            guard v != l.values || c.chart != l.chart || c.origin != l.origin else { continue }
+            l.values = v
+            l.chart = c.chart
+            l.origin = c.origin
+            let line = labelLine(v, c)
+            l.label.show(line?.rect) { [weak self] in if let line { self?.drawLabel(v, line) } }
+            let chip = v.chip.map { (text: $0, rect: chipRect($0, in: c.chart)) }
+            l.chip.show(chip?.rect) { [weak self] in if let chip { self?.drawChip(chip.text, at: chip.rect) } }
+        }
+    }
+
+    /// The label-row values, laid out right-aligned on the label row.
+    private struct LabelLine { let rect: CGRect; let mainX: CGFloat; let detailX: CGFloat }
+
+    private func labelLine(_ v: Values, _ c: Cell) -> LabelLine? {
+        let mainW = v.labelMain.map { ($0 as NSString).size(withAttributes: mainAttrs).width } ?? 0
+        let detailW = v.labelDetail.map { ($0 as NSString).size(withAttributes: detailAttrs).width } ?? 0
+        guard mainW + detailW > 0 else { return nil }
+        let mainX = c.chart.maxX - mainW
+        let detailX = (v.labelMain != nil ? mainX - 6 : c.chart.maxX) - detailW
+        return LabelLine(rect: CGRect(x: detailX, y: c.origin.y - 0.5, width: c.chart.maxX - detailX, height: 13),
+                         mainX: mainX, detailX: detailX)
+    }
+
+    /// Main value in the label color, details dimmer before it.
+    private func drawLabel(_ v: Values, _ line: LabelLine) {
+        (v.labelMain as NSString?)?.draw(at: NSPoint(x: line.mainX, y: line.rect.minY), withAttributes: mainAttrs)
+        (v.labelDetail as NSString?)?.draw(at: NSPoint(x: line.detailX, y: line.rect.minY), withAttributes: detailAttrs)
+    }
+
+    /// The value chip in the chart's bottom-right corner.
+    private func chipRect(_ text: String, in rect: CGRect) -> CGRect {
+        let size = (text as NSString).size(withAttributes: chipAttrs)
+        return CGRect(x: rect.maxX - size.width - 8, y: rect.maxY - size.height - 3, width: size.width + 6, height: size.height + 1)
+    }
+
+    /// Small value chip, translucent so bars still show around it.
+    private func drawChip(_ text: String, at chip: CGRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.setFillColor(NSColor.windowBackgroundColor.withAlphaComponent(0.75).cgColor)
         ctx.addPath(CGPath(roundedRect: chip, cornerWidth: 3, cornerHeight: 3, transform: nil))
         ctx.fillPath()
-        (text as NSString).draw(at: NSPoint(x: chip.minX + 3, y: chip.minY + 0.5), withAttributes: a)
+        (text as NSString).draw(at: NSPoint(x: chip.minX + 3, y: chip.minY + 0.5), withAttributes: chipAttrs)
+    }
+
+    /// Over the charts: per chart a cursor layer, which only ever moves, and two small text
+    /// layers, redrawn when their text changes.
+    private final class Overlay: LayerHostView {
+        final class CellLayers {
+            let cursor = StillLayer(), label: TextLayer, chip: TextLayer
+            var values: Values?
+            var chart = CGRect.null, origin = CGPoint.zero
+            init(label: TextLayer, chip: TextLayer) { self.label = label; self.chip = chip }
+        }
+        private(set) var cells: [CellLayers] = []
+
+        /// One set of layers per chart on screen.
+        func prepare(count: Int) {
+            guard cells.count != count else { return }
+            while cells.count > count {
+                let c = cells.removeLast()
+                [c.cursor, c.label, c.chip].forEach { $0.removeFromSuperlayer() }
+            }
+            while cells.count < count {
+                let c = CellLayers(label: addTextLayer(), chip: addTextLayer())
+                c.cursor.isHidden = true
+                layer?.addSublayer(c.cursor)
+                cells.append(c)
+            }
+            restyle()
+        }
+
+        override func restyle() {
+            super.restyle()
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                let color = NSColor.labelColor.withAlphaComponent(0.6).cgColor
+                for c in cells { c.cursor.backgroundColor = color }
+            }
+        }
     }
 
     /// Visible value range for a row, plus the data's own min/max (for smart-scale labels).
@@ -265,7 +478,7 @@ final class ChartsView: NSView {
             var m = maxAbs(maxBuf)
             if case .mirrored = row.shape { m = max(m, maxAbs(maxBuf2)) }
             return (0, max(minV, m * 1.1), .nan, .nan)
-        case .smart(_, let otherwise) where !zoom:
+        case .smart(_, let otherwise) where !fitScale:
             return range(row, otherwise)
         case .smart(let minSpan, _):
             let lows = avgBuf.filter(\.isFinite), highs = maxBuf.filter(\.isFinite)
@@ -368,46 +581,46 @@ extension ChartsView {
         ids.compactMap { id -> Row? in
             switch id {
             case .cpu:
-                return Row(title: id.title, series: .cpu, shape: .up, scale: .fixed(100), color: .systemIndigo, color2: nil) { v, _ in
+                return Row(id: id, series: .cpu, shape: .up, scale: .fixed(100), color: .systemIndigo, color2: nil) { v, _ in
                     let e = v(.ecpu), p = v(.pcpu)
                     return (Fmt.pct(v(.cpu)), e.isFinite && p.isFinite ? "E \(Int(e.rounded())) · P \(Int(p.rounded()))" : nil)
-                }.with(limit: { t, _ in t.cpu })
+                }.with(axis: Fmt.pct, limit: { t, _ in t.cpu })
             case .gpu:
-                return Row(title: id.title, series: .gpu, shape: .up, scale: .fixed(100), color: .systemIndigo, color2: nil) { v, _ in
+                return Row(id: id, series: .gpu, shape: .up, scale: .fixed(100), color: .systemIndigo, color2: nil) { v, _ in
                     (Fmt.pct(v(.gpu)), nil)
-                }.with(limit: { t, _ in t.gpu })
+                }.with(axis: Fmt.pct, limit: { t, _ in t.gpu })
             case .ram:
-                return Row(title: id.title, series: .ram, shape: .up, scale: .smart(minSpan: 2, otherwise: .ramTotal), color: .systemGreen, color2: nil) { v, live in
+                return Row(id: id, series: .ram, shape: .up, scale: .smart(minSpan: 2, otherwise: .ramTotal), color: .systemGreen, color2: nil) { v, live in
                     var main = Fmt.gb(v(.ram))
                     if let total = live?.ramTotalGB, total.isFinite { main += " / " + Fmt.gb(total) }
                     let sw = v(.swap)
                     return (main, sw.isFinite && sw > 0.05 ? "swap " + Fmt.gb(sw) : nil)
                 }.with(axis: Fmt.gb, limit: { t, s in s.map { $0.ramTotalGB * t.ram / 100 } })
             case .power:
-                return Row(title: id.title, series: .sysPower, shape: .up, scale: .auto(min: 10), color: .systemOrange, color2: nil) { v, _ in
+                return Row(id: id, series: .sysPower, shape: .up, scale: .auto(min: 10), color: .systemOrange, color2: nil) { v, _ in
                     (Fmt.watts(v(.sysPower)), "CPU " + Fmt.num(v(.cpuPower)) + " · GPU " + Fmt.num(v(.gpuPower)))
-                }
+                }.with(axis: Fmt.watts)
             case .battery:
                 guard hasBattery else { return nil }
-                return Row(title: id.title, series: .batteryW, shape: .signed, scale: .auto(min: 10), color: .systemOrange, color2: nil) { v, _ in
+                return Row(id: id, series: .batteryW, shape: .signed, scale: .auto(min: 10), color: .systemOrange, color2: nil) { v, _ in
                     (Fmt.signedWatts(v(.batteryW)), Fmt.pct(v(.batteryPct)))
-                }
+                }.with(axis: Fmt.signedWatts)
             case .temp:
-                return Row(title: id.title, series: .cpuTemp, shape: .up, scale: .smart(minSpan: 6, otherwise: .fixed(100)), color: .systemRed, color2: nil) { v, _ in
+                return Row(id: id, series: .cpuTemp, shape: .up, scale: .smart(minSpan: 6, otherwise: .fixed(100)), color: .systemRed, color2: nil) { v, _ in
                     (Fmt.temp(v(.cpuTemp)), "GPU " + Fmt.temp(v(.gpuTemp)))
                 }.with(axis: Fmt.temp, limit: { t, _ in t.temp })
             case .fans:
                 guard fanCount > 0 else { return nil }
-                return Row(title: id.title, series: .fan0, shape: .up, scale: .fanMax, color: .systemGray, color2: nil) { v, _ in
+                return Row(id: id, series: .fan0, shape: .up, scale: .fanMax, color: .systemGray, color2: nil) { v, _ in
                     let a = v(.fan0), b = v(.fan1)
                     let fmt: (Float) -> String = { $0.isFinite ? "\(Int($0.rounded()))" : Fmt.dash }
                     return ((fanCount > 1 ? fmt(a) + " / " + fmt(b) : fmt(a)) + " rpm", nil)
-                }
+                }.with(axis: { $0.isFinite ? "\(Int($0.rounded())) rpm" : Fmt.dash })
             case .disk:
-                return Row(title: id.title, series: .diskRead, shape: .mirrored(.diskWrite), scale: .auto(min: 10),
+                return Row(id: id, series: .diskRead, shape: .mirrored(.diskWrite), scale: .auto(min: 10),
                            color: .systemBlue, color2: .systemTeal) { v, _ in
                     ("R " + Fmt.num(v(.diskRead)) + " · W " + Fmt.num(v(.diskWrite)) + " MB/s", nil)
-                }
+                }.with(axis: { Fmt.num($0) + " MB/s" })
             }
         }
     }

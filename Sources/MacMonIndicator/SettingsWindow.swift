@@ -13,6 +13,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let columnsPopup = NSPopUpButton()
     private let valuePopup = NSPopUpButton()
     private let zoomBox = NSButton(checkboxWithTitle: "Zoom Temp and RAM", target: nil, action: nil)
+    private let heightSlider = NSSlider(value: 30, minValue: Double(ChartLayout.heightRange.lowerBound),
+                                        maxValue: Double(ChartLayout.heightRange.upperBound), target: nil, action: nil)
+    private let heightLabel = NSTextField(labelWithString: "")
     private static let valueTitles: [(ChartLayout.Value, String)] = [
         (.split, "Main value in chart, details on label row"), (.chart, "Value in chart"), (.label, "Value on label row"),
     ]
@@ -120,6 +123,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let chartOptions = NSStackView(views: [columnsPopup, valuePopup, zoomBox])
         chartOptions.spacing = 8
 
+        heightSlider.doubleValue = Double(layout.chartHeight)
+        heightSlider.isContinuous = true // the label follows while dragging; the setting is saved on release
+        heightSlider.controlSize = .small
+        heightSlider.target = self
+        heightSlider.action = #selector(chartHeightChanged)
+        heightSlider.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        heightLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        heightLabel.textColor = .secondaryLabelColor
+        heightLabel.widthAnchor.constraint(equalToConstant: 40).isActive = true
+        updateHeightLabel()
+        let heightTitle = label("Chart height")
+        heightTitle.font = .systemFont(ofSize: 12)
+        let heightRow = NSStackView(views: [heightTitle, heightSlider, heightLabel,
+                                            note("Click a chart in the menu to see it large.")])
+        heightRow.spacing = 6
+
         iconsBox.state = s.showIcons ? .on : .off
         iconsBox.target = self
         iconsBox.action = #selector(layoutChanged)
@@ -221,6 +240,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [label("Menu charts", bold: true), chartGrid],
             [NSGridCell.emptyContentView, note("Left to right, top to bottom in two columns; top to bottom in one. Battery and fans only show on Macs that have them.")],
             [NSGridCell.emptyContentView, chartOptions],
+            [NSGridCell.emptyContentView, heightRow],
             [label("Update every", bold: true), intervalRow],
             [label("Turn red at", bold: true), warnRow],
             [NSGridCell.emptyContentView, note("Temperature turns orange 10 °C below its limit. RAM also follows macOS memory pressure.")],
@@ -234,7 +254,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         grid.rowSpacing = 8
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
-        for r in [0, 5, 8, 9, 11, 15] { grid.row(at: r).yPlacement = .center }
+        for r in [0, 5, 9, 10, 12, 16] { grid.row(at: r).yPlacement = .center }
         grid.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -259,7 +279,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func chartLayoutChanged() {
         s.chartLayout = ChartLayout(columns: columnsPopup.indexOfSelectedItem + 1,
                                     value: Self.valueTitles[max(0, valuePopup.indexOfSelectedItem)].0)
+        // Until the height has been set, it follows the column count's default.
+        heightSlider.doubleValue = Double(s.chartLayout.chartHeight)
+        updateHeightLabel()
     }
+
+    @objc private func chartHeightChanged() {
+        updateHeightLabel()
+        // Save once the drag ends (or for a key press), not for every step.
+        if NSApp.currentEvent?.type != .leftMouseDragged { s.chartHeight = heightSlider.doubleValue.rounded() }
+    }
+
+    private func updateHeightLabel() { heightLabel.stringValue = "\(Int(heightSlider.doubleValue.rounded())) pt" }
 
     @objc private func slotsChanged() {
         s.barMetrics = slotPopups.compactMap { p in

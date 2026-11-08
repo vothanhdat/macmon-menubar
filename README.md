@@ -18,7 +18,8 @@ _Screenshots use demo history and demo process names._
   filled bar charts for 5m (default) / 1h / 24h / 7d / 30d in one or two columns. You choose which
   charts appear and in what order, and where the values go (in the chart, on the label row, or split).
   The solid bar is the average, the faint bar is the peak, so short spikes stay visible.
-  Hover to read values at any moment.
+  Hover to read values at any moment. **Click a chart** to see it alone at full width with its
+  scale; click again to go back. Chart height is adjustable.
 - **Top processes**: CPU, RAM and disk. By default you get the top 2 of each; click a column to see
   the top 6 by that column (click again to go back).
 - **Battery** charge/discharge watts, **disk** read/write throughput.
@@ -75,7 +76,7 @@ Other commands: `make app` (build only, into `build/`), `make run`, `make uninst
 
 - **Click** (left or right): the menu with charts, top processes, **About**, **Settings… (⌘,)** and **Quit (⌘Q)**. About shows the version and the macmon version in use.
 - **Settings**: menu bar slots, icons, one or two lines, text size, spacing, edge padding and opacity
-  (the menu bar updates live while you drag), menu charts (which, order, columns, value position), update interval (on power / on battery), warning limits, launch at
+  (the menu bar updates live while you drag), menu charts (which, order, columns, value position, height), update interval (on power / on battery), warning limits, launch at
   login, free memory while the display sleeps, root mode, CSV export.
 
 ## Resource use
@@ -106,6 +107,10 @@ How it stays small:
 - **No sensor code in the app.** macmon does the sampling. The app reads one JSON line per interval
   and decodes only the ~15 fields it uses (about 2 ms of work per sample).
 - **AppKit only, no SwiftUI.** Charts are drawn by hand with Core Graphics.
+- **Cheap hovering.** Moving the pointer over the charts never redraws the bars. The cursor is a
+  layer that only moves, and each value is a small layer redrawn only when its text changes (at most
+  30 times a second). Redrawing even part of a view on every move costs AppKit several ms, so a fast
+  sweep across the charts went from about 27% of one core to about 8%.
 - **Few menu bar redraws.** Each change of a menu bar item costs macOS about 20 ms of CPU, more than
   everything else the app does. The item is a pre-rendered image (a template image, so macOS tints it
   itself) that is replaced only when the text or color changes. **Ignore small changes** (on by
@@ -202,6 +207,13 @@ its menu three times and prints footprint and RSS at fixed times after each clos
 `MACMON_DEBUG_MENU_HOLD` (seconds open, default 6) and `MACMON_DEBUG_MENU_GAP` (seconds between opens,
 default 60) adjust the timing. Add `MACMON_DEBUG_FAKE_DISPLAY_SLEEP=1` (and `MACMON_DEBUG_RESTART_DELAY=5`)
 to test the quiet restart: after the last cycle the app acts as if the displays went to sleep.
+
+`MACMON_DEBUG_HOVER=1` (with a hold of about 20 s) measures CPU while the menu is open: with the
+pointer still, while sweeping the charts, and while sweeping a zoomed chart (synthetic mouse events at
+120 Hz). `MACMON_DEBUG_PANEL=1` shows the charts in a floating panel at the bottom right instead of
+the menu, because an open menu takes the keyboard and typing elsewhere closes it.
+`MACMON_DEBUG_RENDER=<dir>` also saves screen captures of the charts during the test.
+`--settings <dir>` renders the Settings window, light and dark.
 
 **Releasing a new version:**
 1. Set `VERSION` in the Makefile.

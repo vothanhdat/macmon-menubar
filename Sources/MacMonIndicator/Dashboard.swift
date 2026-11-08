@@ -36,6 +36,7 @@ final class DashboardMenu {
             UserDefaults.standard.set(HistoryStore.tiers[i].label, forKey: "historyRange")
         }
         charts.onHover = { [weak self] t in self?.showTime(t) }
+        charts.onZoom = { [weak self] in self?.layout() }
         top.addSubview(tierBar)
         top.addSubview(charts)
         statusItem.isEnabled = false
@@ -45,7 +46,7 @@ final class DashboardMenu {
     private func layout() {
         tierBar.frame = NSRect(x: 0, y: 2, width: Self.width, height: TierBar.height)
         charts.frame = NSRect(x: 0, y: tierBar.frame.maxY + 6, width: Self.width,
-                              height: ChartsView.height(count: charts.rows.count, layout: charts.layout))
+                              height: ChartsView.height(count: charts.rows.count, layout: charts.layout, zoomed: charts.zoomed != nil))
         top.frame = NSRect(x: 0, y: 0, width: Self.width, height: charts.frame.maxY + 2)
         processes.frame = NSRect(x: 0, y: 0, width: Self.width, height: ProcessListView.height)
     }
@@ -84,7 +85,8 @@ final class DashboardMenu {
         guard let t else { tierBar.timeText = "Now"; return }
         let tier = charts.tier
         let short = HistoryStore.tiers[tier].bucket < 60
-        timeFormatter.dateFormat = short ? "HH:mm:ss" : (HistoryStore.tiers[tier].bucket < 1800 ? "HH:mm" : "EEE d MMM HH:mm")
+        let format = short ? "HH:mm:ss" : (HistoryStore.tiers[tier].bucket < 1800 ? "HH:mm" : "EEE d MMM HH:mm")
+        if timeFormatter.dateFormat != format { timeFormatter.dateFormat = format } // setting it re-parses the format
         let start = timeFormatter.string(from: Date(timeIntervalSince1970: t))
         if HistoryStore.tiers[tier].bucket < 1800 {
             let end = timeFormatter.string(from: Date(timeIntervalSince1970: t + HistoryStore.tiers[tier].bucket))
@@ -112,14 +114,41 @@ final class DashboardMenu {
 final class TierBar: NSView {
     static let height: CGFloat = 24
     var selected = 0 { didSet { needsDisplay = true } }
-    var timeText = "Now" { didSet { if timeText != oldValue { needsDisplay = true } } }
+    /// Changes with every pointer move over the charts, so it is drawn in a layer of its own
+    /// (see TextLayer.swift); the tabs are not redrawn.
+    var timeText = "Now" { didSet { if timeText != oldValue { showTime() } } }
     var onSelect: ((Int) -> Void)?
 
     private let labels = HistoryStore.tiers.map(\.label)
     private let font = NSFont.systemFont(ofSize: 12, weight: .medium)
-    private let timeFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+    private let timeAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+                                                            .foregroundColor: NSColor.secondaryLabelColor]
+    private let timeHost = LayerHostView()
+    private lazy var timeLayer = timeHost.addTextLayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        timeHost.autoresizingMask = [.width, .height]
+        addSubview(timeHost)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
 
     override var isFlipped: Bool { true }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        timeHost.frame = bounds
+        showTime()
+    }
+
+    /// Right-aligned, vertically centered.
+    private func showTime() {
+        let t = timeText as NSString
+        let size = t.size(withAttributes: timeAttrs)
+        let r = CGRect(x: bounds.width - DashboardMenu.inset - size.width, y: 12 - size.height / 2, width: size.width, height: size.height)
+        timeLayer.show(r) { [timeAttrs] in t.draw(at: r.origin, withAttributes: timeAttrs) }
+    }
 
     private func tabRects() -> [NSRect] {
         var x = DashboardMenu.inset - 7
@@ -145,10 +174,12 @@ final class TierBar: NSView {
             let size = s.size(withAttributes: attrs)
             s.draw(at: NSPoint(x: r.midX - size.width / 2, y: r.midY - size.height / 2), withAttributes: attrs)
         }
-        let attrs: [NSAttributedString.Key: Any] = [.font: timeFont, .foregroundColor: NSColor.secondaryLabelColor]
-        let t = timeText as NSString
-        let size = t.size(withAttributes: attrs)
-        t.draw(at: NSPoint(x: bounds.width - DashboardMenu.inset - size.width, y: 12 - size.height / 2), withAttributes: attrs)
+        // Offscreen (snapshots) the time layer isn't shown, so draw the time here.
+        if window == nil {
+            let t = timeText as NSString
+            let size = t.size(withAttributes: timeAttrs)
+            t.draw(at: NSPoint(x: bounds.width - DashboardMenu.inset - size.width, y: 12 - size.height / 2), withAttributes: timeAttrs)
+        }
     }
 
     // Menus deliver mouseUp to custom item views; the menu stays open.

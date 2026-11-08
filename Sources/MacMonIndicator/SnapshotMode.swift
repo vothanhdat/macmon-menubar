@@ -197,6 +197,26 @@ enum SnapshotMode {
         exit(0)
     }
 
+    /// `--settings <dir>`: the Settings window's content as settings-light.png and settings-dark.png.
+    static func settingsPreview(to dir: String) {
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            let wc = SettingsWindowController()
+            guard let view = wc.window?.contentView else { exit(1) }
+            view.layoutSubtreeIfNeeded()
+            view.frame.size = view.fittingSize
+            wc.window?.contentView = NSView() // render the content on its own
+            var bg = NSColor.windowBackgroundColor
+            NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+                bg = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? bg
+            }
+            write(view, appearance: appearance, background: bg, padding: 0, to: "\(dir)/settings-\(name).png")
+        }
+        print("Wrote \(dir)/settings-light.png and settings-dark.png")
+        exit(0)
+    }
+
     // MARK: - Menu bar look previews
 
     /// `--bar-previews <file.png>`: a sheet of menu bar looks (text size × spacing, plus opacity),

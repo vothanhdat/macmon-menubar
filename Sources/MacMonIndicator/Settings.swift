@@ -73,11 +73,20 @@ final class Settings {
     var chartLayout: ChartLayout {
         get {
             ChartLayout(columns: min(2, max(1, d.integer(forKey: "chartColumns"))),
-                        value: ChartLayout.Value(rawValue: d.string(forKey: "chartValue") ?? "") ?? .split)
+                        value: ChartLayout.Value(rawValue: d.string(forKey: "chartValue") ?? "") ?? .split,
+                        height: chartHeight.map { CGFloat($0) })
         }
         set {
             d.set(newValue.columns, forKey: "chartColumns")
             d.set(newValue.value.rawValue, forKey: "chartValue")
+            notify()
+        }
+    }
+    /// Height of each menu chart in points; nil uses the default for the column count.
+    var chartHeight: Double? {
+        get { d.object(forKey: "chartHeight") as? Double }
+        set {
+            if let newValue { d.set(newValue, forKey: "chartHeight") } else { d.removeObject(forKey: "chartHeight") }
             notify()
         }
     }

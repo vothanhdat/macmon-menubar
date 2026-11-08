@@ -10,6 +10,9 @@ if let i = args.firstIndex(of: "--bar-previews") {
 if let i = args.firstIndex(of: "--iconset") {
     SnapshotMode.writeIconset(to: i + 1 < args.count ? args[i + 1] : "AppIcon.iconset")
 }
+if let i = args.firstIndex(of: "--settings") {
+    SnapshotMode.settingsPreview(to: i + 1 < args.count ? args[i + 1] : "settings")
+}
 if let i = args.firstIndex(of: "--about") {
     SnapshotMode.aboutPreview(to: i + 1 < args.count ? args[i + 1] : "about")
 }
