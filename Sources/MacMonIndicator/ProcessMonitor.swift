@@ -128,6 +128,28 @@ final class ProcessMonitor {
 
     private func machToNs(_ t: UInt64) -> UInt64 { t / timebase.denom * timebase.numer + (t % timebase.denom) * timebase.numer / timebase.denom }
 
+    /// Owner, name and start time of each listed pid, kept while it stays listed. Looking up who
+    /// owns each of ~800 processes, and what yours are called, on every scan was most of the app's
+    /// own system calls (about 1,200 a second while scanning). A pid reused by a new process of
+    /// yours shows a different start time and is looked up again. (One reused by a process of
+    /// yours within a scan's 2 s, after belonging to someone else, shows through /bin/ps until it
+    /// ends: pids count up to 99,999 before reuse, so that is unlikely.)
+    private var known: [pid_t: (mine: Bool, name: String, start: UInt64)] = [:]
+    private var nameBuf = [CChar](repeating: 0, count: 256)
+
+    /// Whether a process is yours, and its name if it is. Nil if it has gone.
+    private func lookUp(_ pid: pid_t) -> (mine: Bool, name: String)? {
+        var si = proc_bsdshortinfo()
+        guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &si, Int32(MemoryLayout<proc_bsdshortinfo>.size)) > 0 else { return nil }
+        guard si.pbsi_uid == me else { return (false, "") }
+        var name = ""
+        if proc_name(pid, &nameBuf, UInt32(nameBuf.count)) > 0 { name = String(cString: nameBuf) }
+        if name.isEmpty {
+            name = withUnsafeBytes(of: si.pbsi_comm) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+        }
+        return (true, name)
+    }
+
     private func collectOwn() -> [pid_t: Raw] {
         var out: [pid_t: Raw] = [:]
         let estimate = proc_listallpids(nil, 0)
@@ -136,27 +158,35 @@ final class ProcessMonitor {
         let n = pids.withUnsafeMutableBufferPointer { buf in
             proc_listallpids(buf.baseAddress, Int32(buf.count * MemoryLayout<pid_t>.size))
         }
-        var nameBuf = [CChar](repeating: 0, count: 256)
-        for pid in pids.prefix(Int(max(0, n))) where pid > 0 {
-            var si = proc_bsdshortinfo()
-            guard proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &si, Int32(MemoryLayout<proc_bsdshortinfo>.size)) > 0,
-                  si.pbsi_uid == me else { continue }
+        let listed = pids.prefix(Int(max(0, n))).filter { $0 > 0 }
+        for pid in listed {
+            if known[pid] == nil {
+                guard let info = lookUp(pid) else { continue }
+                known[pid] = (info.mine, info.name, 0)
+            }
+            guard var entry = known[pid], entry.mine else { continue } // someone else's: /bin/ps covers it
             var ru = rusage_info_v4()
             let ok = withUnsafeMutablePointer(to: &ru) { p in
                 p.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
             }
             guard ok == 0 else { continue }
-            var name = ""
-            if proc_name(pid, &nameBuf, UInt32(nameBuf.count)) > 0 { name = String(cString: nameBuf) }
-            if name.isEmpty {
-                name = withUnsafeBytes(of: si.pbsi_comm) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+            if entry.start != ru.ri_proc_start_abstime {
+                if entry.start != 0, let info = lookUp(pid) { entry.name = info.name } // a new process with a reused pid
+                entry.start = ru.ri_proc_start_abstime
+                known[pid] = entry
             }
-            out[pid] = Raw(name: name,
-                           cpuNs: machToNs(ru.ri_user_time &+ ru.ri_system_time),
+            let cpuNs = machToNs(ru.ri_user_time &+ ru.ri_system_time)
+            // No CPU time since the last scan means no system calls either: keep the last count.
+            var syscalls: UInt32?
+            if let p = prev[pid], p.cpuNs == cpuNs, let s = p.syscalls { syscalls = s } else { syscalls = Self.unixSyscalls(pid) }
+            out[pid] = Raw(name: entry.name,
+                           cpuNs: cpuNs,
                            mem: Double(ru.ri_phys_footprint),
                            disk: ru.ri_diskio_bytesread &+ ru.ri_diskio_byteswritten,
-                           syscalls: Self.unixSyscalls(pid))
+                           syscalls: syscalls)
         }
+        let alive = Set(listed)
+        known = known.filter { alive.contains($0.key) }
         return out
     }
 
