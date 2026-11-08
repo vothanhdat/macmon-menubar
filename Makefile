@@ -1,7 +1,7 @@
 APP_NAME   := MacMon Indicator
 EXEC       := MacMonIndicator
 BUNDLE_ID  ?= local.MacMonIndicator
-VERSION    ?= 0.1.3
+VERSION    ?= 0.1.4
 BUILD_DIR  := build
 APP        := $(BUILD_DIR)/$(APP_NAME).app
 PREFIX     ?= /Applications
