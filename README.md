@@ -17,8 +17,9 @@ _Screenshots use demo history and demo process names._
 - **Menu**: a native macOS menu, so it has the same glass look as your other menu bar menus. It holds
   filled bar charts for 5m (default) / 1h / 24h / 7d / 30d in one or two columns. You choose which
   charts appear and in what order, and where the values go (in the chart, on the label row, or split).
-  The solid bar is the average, the faint bar is the peak, so short spikes stay visible.
-  Hover to read values at any moment. **Click a chart** to see it alone at full width with its
+  The solid bar is the average, the faint bar is the peak, so short spikes stay visible. CPU, GPU,
+  RAM and Temp bars blend into red as they near your warning limits, and values past a limit show
+  in red. Hover to read values at any moment. **Click a chart** to see it alone at full width with its
   scale; click again to go back. Chart height is adjustable.
 - **Top processes**: CPU, RAM and disk. By default you get the top 2 of each; click a column to see
   the top 6 by that column (click again to go back).
@@ -179,6 +180,10 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
   0 to the highest value in view. Turn on **Settings → Zoom Temp and RAM** to scale those two to
   the range their data covers. Small labels then show the highest and lowest values in view. A
   dashed red line marks your warning limit whenever it falls inside the visible range.
+- **Warning colors** in the charts follow the value, not the bar's height, so they mean the same on
+  any scale. Bars blend from the chart's own color into red over the last quarter of the scale
+  below your limit (25 points for CPU, GPU and Temp, a quarter of total RAM), and are fully red at
+  the limit and above. Temp is orange so that its red stands out.
 
 ## Troubleshooting
 

@@ -33,6 +33,12 @@ enum SnapshotMode {
                 renderStatus(hot, appearance: appearance, to: "\(outputDir)/menubar-warning-\(name).png")
                 renderDashboard(history: history, sample: s, procs: procSnap, hasBattery: source.hasBattery,
                                 appearance: appearance, to: "\(outputDir)/dropdown-\(name).png")
+                // Values over the warning limits, to check the red values and bars.
+                var busy = hot
+                busy.cpu = 97
+                busy.ramUsedGB = busy.ramTotalGB * 0.95
+                renderDashboard(history: history, sample: busy, procs: procSnap, hasBattery: source.hasBattery,
+                                appearance: appearance, to: "\(outputDir)/dropdown-warning-\(name).png")
             }
             pm.stop()
             try? FileManager.default.removeItem(at: tmp)
