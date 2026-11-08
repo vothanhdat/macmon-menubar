@@ -49,7 +49,12 @@ enum CPUProbe {
 /// then while sweeping it across the charts (synthetic mouse-moved events at 120 Hz).
 /// `MACMON_DEBUG_PANEL=1` shows the charts in a small floating panel at the bottom right instead
 /// of opening the menu: an open menu takes the keyboard, so typing elsewhere would close it.
+/// `MACMON_DEBUG_WINDOW=1` opens the dashboard window instead (without activating the app), runs
+/// the same tests with clicks sent through the window, then resizes, minimizes and closes it.
 final class MenuCycler {
+    /// Opens the dashboard window (set by the app delegate).
+    var openWindow: (() -> NSWindow?)?
+    private var testWindow: NSWindow?
     private let menu: NSMenu
     private let anchor: NSView
     private var left: Int
@@ -70,7 +75,9 @@ final class MenuCycler {
         gap = env["MACMON_DEBUG_MENU_GAP"].flatMap(Double.init) ?? 60
         hover = env["MACMON_DEBUG_HOVER"] != nil
         inPanel = env["MACMON_DEBUG_PANEL"] != nil
+        inWindow = env["MACMON_DEBUG_WINDOW"] != nil
     }
+    private let inWindow: Bool
 
     private static func line(_ s: String) {
         log.notice("\(s, privacy: .public)")
@@ -97,15 +104,29 @@ final class MenuCycler {
                              on, (o.seconds - mark.overlay.seconds) / Double(max(1, on)) * 1000))
         }
         let charts = { [weak self] () -> ChartsView? in
-            let top = self?.panel?.contentView?.subviews.first ?? self?.menu.items.first?.view
-            return top?.subviews.compactMap { $0 as? ChartsView }.first
+            func find(_ v: NSView?) -> ChartsView? {
+                guard let v else { return nil }
+                if let c = v as? ChartsView { return c }
+                return v.subviews.lazy.compactMap(find).first
+            }
+            return find(self?.testWindow?.contentView ?? self?.panel?.contentView?.subviews.first ?? self?.menu.items.first?.view)
         }
+        let inWindow = self.inWindow
         func send(_ type: NSEvent.EventType, x: CGFloat, y: CGFloat = 30) {
-            guard let c = charts(), let w = c.window,
-                  let e = NSEvent.mouseEvent(with: type, location: c.convert(NSPoint(x: x, y: y), to: nil), modifierFlags: [],
-                                             timestamp: 0, windowNumber: w.windowNumber, context: nil, eventNumber: 0,
-                                             clickCount: 1, pressure: 0) else { return }
-            if type == .mouseMoved { c.mouseMoved(with: e) } else { c.mouseUp(with: e) }
+            guard let c = charts(), let w = c.window else { return }
+            let event = { (t: NSEvent.EventType) in
+                NSEvent.mouseEvent(with: t, location: c.convert(NSPoint(x: x, y: y), to: nil), modifierFlags: [],
+                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: w.windowNumber, context: nil,
+                                   eventNumber: 0, clickCount: 1, pressure: 0)
+            }
+            if type == .mouseMoved {
+                if let e = event(.mouseMoved) { c.mouseMoved(with: e) }
+            } else if inWindow {
+                // A real click: down and up through the window, as AppKit routes them.
+                if let d = event(.leftMouseDown), let u = event(.leftMouseUp) { w.sendEvent(d); w.sendEvent(u) }
+            } else if let e = event(type) {
+                c.mouseUp(with: e)
+            }
         }
         let size = { (tag: String) in
             guard let c = charts(), let w = c.window else { return }
@@ -129,7 +150,7 @@ final class MenuCycler {
                 guard let c = charts() else { return }
                 // Back and forth across the first column, 0.8 s each way.
                 let f = (CACurrentMediaTime() - t0).truncatingRemainder(dividingBy: 1.6) / 0.8
-                send(.mouseMoved, x: DashboardMenu.inset + 1 + (f < 1 ? f : 2 - f) * (c.bounds.width / 2 - DashboardMenu.inset - 8))
+                send(.mouseMoved, x: Dashboard.inset + 1 + (f < 1 ? f : 2 - f) * (c.bounds.width / 2 - Dashboard.inset - 8))
             }
             RunLoop.main.add(t, forMode: .common)
             sweep = t
@@ -146,7 +167,7 @@ final class MenuCycler {
         Self.after(settle + phase * 2) {
             sweep?.invalidate()
             end("open, sweeping charts")
-            send(.leftMouseUp, x: DashboardMenu.inset + 20)
+            send(.leftMouseUp, x: Dashboard.inset + 20)
             Self.after(0.3) { size("zoomed") }
             begin()
             startSweep()
@@ -154,15 +175,63 @@ final class MenuCycler {
         Self.after(settle + phase * 3) {
             sweep?.invalidate()
             end("open, sweeping zoomed chart")
-            send(.leftMouseUp, x: DashboardMenu.inset + 20)
+            send(.leftMouseUp, x: Dashboard.inset + 20)
             Self.after(0.3) { size("back to grid") }
+            if inWindow { Self.after(0.5) { [weak self] in self?.windowTest() } }
+        }
+    }
+
+    /// Bigger window sizes (layout and draw time), then minimize and restore.
+    private func windowTest() {
+        guard let w = testWindow else { return }
+        let sizes = [NSSize(width: 420, height: 0), NSSize(width: 700, height: 800), NSSize(width: 1000, height: 1100)]
+        func report(_ tag: String) {
+            func find<T: NSView>(_ v: NSView?, _: T.Type) -> T? {
+                guard let v else { return nil }
+                if let t = v as? T { return t }
+                return v.subviews.lazy.compactMap { find($0, T.self) }.first
+            }
+            let c = find(w.contentView, ChartsView.self), p = find(w.contentView, ProcessListView.self)
+            Self.line("[window] \(tag): content \(Int(w.contentLayoutRect.width)) x \(Int(w.contentLayoutRect.height)), charts "
+                      + "\(Int(c?.frame.width ?? 0)) x \(Int(c?.frame.height ?? 0)) (each \(Int(c?.layout.chartHeight ?? 0)) pt), "
+                      + "process rows \(p?.rowCount ?? 0), bottom \(Int(p?.frame.maxY ?? 0))")
+        }
+        var t = 0.0
+        for s in sizes {
+            Self.after(t) {
+                w.setContentSize(s) // height 0: the minimum
+                Self.after(0.3) {
+                    report("\(Int(s.width)) x \(Int(s.height))")
+                    let d0 = ChartsView.drawStats
+                    for _ in 0..<5 { find(w.contentView)?.display() }
+                    let d = ChartsView.drawStats
+                    Self.line(String(format: "[window] chart redraw at this size: %.2f ms (%d draws)",
+                                     (d.seconds - d0.seconds) * 1000 / Double(max(1, d.count - d0.count)), d.count - d0.count))
+                }
+            }
+            t += 1
+        }
+        func find(_ v: NSView?) -> ChartsView? {
+            guard let v else { return nil }
+            if let c = v as? ChartsView { return c }
+            return v.subviews.lazy.compactMap(find).first
+        }
+        // Minimized: no chart draws and no process scans, only the sampler (1 s for another 10 s).
+        var mark = (cpu: 0.0, wall: 0.0, draws: 0)
+        Self.after(t) { w.miniaturize(nil) }
+        Self.after(t + 1) { mark = (CPUProbe.seconds(), CACurrentMediaTime(), ChartsView.drawStats.count) }
+        Self.after(t + 3) {
+            let cpu = CPUProbe.seconds() - mark.cpu, wall = CACurrentMediaTime() - mark.wall
+            Self.line(String(format: "[window] minimized: %.1f%% CPU over %.1f s, %d chart draws", cpu / wall * 100, wall,
+                             ChartsView.drawStats.count - mark.draws))
+            w.deminiaturize(nil)
         }
     }
 
     func start() {
         MemoryProbe.report("launch")
         // After the 20 s launch baseline (not needed for the panel).
-        DispatchQueue.main.asyncAfter(deadline: .now() + (inPanel ? 5 : 25)) { self.cycle() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (inPanel || inWindow ? 5 : 25)) { self.cycle() }
     }
 
     private func cycle() {
@@ -176,6 +245,18 @@ final class MenuCycler {
         }
         left -= 1
         MemoryProbe.report("before open")
+        if inWindow {
+            testWindow = openWindow?()
+            if hover { hoverTest() }
+            // The hover test is followed by resizing, minimizing and restoring (about 8 s).
+            DispatchQueue.main.asyncAfter(deadline: .now() + hold + (hover ? 8 : 0)) { [weak self] in
+                MemoryProbe.report("open, closing")
+                self?.testWindow?.performClose(nil)
+                self?.testWindow = nil
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + gap) { self.cycle() }
+            return
+        }
         if hover { hoverTest() }
         if inPanel {
             openPanel()

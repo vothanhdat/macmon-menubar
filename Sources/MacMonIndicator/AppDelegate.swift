@@ -12,9 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let menu = NSMenu()
     private var menuOpen = false
-    private var dashboard: DashboardMenu?
+    private var dashboard: Dashboard?
+    private var dashboardWindow: DashboardWindowController?
     private var processMonitor: ProcessMonitor?
+    private var lastProcesses: ProcSnapshot?
     private var settingsWindow: SettingsWindowController?
+    private var quitting = false
+    private static let windowOpenKey = "dashboardWindowOpen"
 
     private var intervalWork: DispatchWorkItem?
     private var screensAsleep = false
@@ -26,11 +30,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        // MACMON_INDICATOR_HISTORY_DIR: for testing a build without touching the real history.
+        let dir = ProcessInfo.processInfo.environment["MACMON_INDICATOR_HISTORY_DIR"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MacMonIndicator", isDirectory: true)
         history = HistoryStore(directory: dir)
         menu.delegate = self
         menu.autoenablesItems = false
+        buildMainMenu()
         status = StatusItemController(menu: menu)
         status.update(nil)
 
@@ -49,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.status.applySettings()
             self.status.update(self.latest)
             self.macmon.setInterval(self.desiredInterval())
+            self.dashboardWindow?.settingsChanged()
         }
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -84,7 +92,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sigterm = term
 
         cycler = MenuCycler(menu: menu, anchor: status.item.button)
+        cycler?.openWindow = { [weak self] in self?.showDashboardWindow(activate: false); return self?.dashboardWindow?.window }
         cycler?.start()
+
+        // Open at login, and again after a quiet restart, if it was open before.
+        if UserDefaults.standard.bool(forKey: Self.windowOpenKey) { showDashboardWindow(activate: false) }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        quitting = true // the window stays "open" for next time
+        return .terminateNow
+    }
+
+    /// Clicking the Dock icon (only there while the window is open) brings back a minimized window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag, dashboardWindow != nil { showDashboardWindow(activate: true) }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -134,9 +157,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// 1 s while the menu is open, 10 s while the displays sleep, otherwise the user's AC/battery choice.
+    /// The dashboard window is open and can be seen (not minimized, covered or on another Space).
+    private var windowVisible: Bool { dashboardWindow?.isVisible ?? false }
+
+    /// 1 s while the menu is open or the window can be seen, 10 s while the displays sleep,
+    /// otherwise the user's AC/battery choice.
     private func desiredInterval() -> Int {
-        if menuOpen { return 1000 }
+        if menuOpen || windowVisible { return 1000 }
         if screensAsleep { return 10_000 }
         let s = Settings.shared
         return onAC ? s.intervalAC : s.intervalBattery
@@ -151,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             macmon.setInterval(desiredInterval())
         }
         dashboard?.update(sample: s)
+        if windowVisible { dashboardWindow?.dashboard.update(sample: s) }
         if s.diskRead.isFinite && s.diskWrite.isFinite { processMonitor?.setTotalDisk(mbps: s.diskRead + s.diskWrite) }
     }
 
@@ -166,12 +194,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Called right before the menu shows: build the dashboard items.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        let d = DashboardMenu(history: history, latest: latest, hasBattery: macmon.hasBattery)
+        let d = Dashboard(history: history, latest: latest, hasBattery: macmon.hasBattery)
         dashboard = d
         // Only mention macmon when something is wrong.
         let problem = (macmon.state == .notFound || macmon.state == .failed) ? macmonStatusText() : nil
-        menu.items = d.items(status: problem, target: self, about: #selector(openAbout),
+        menu.items = d.items(status: problem, target: self, openWindow: #selector(openDashboardWindow), about: #selector(openAbout),
                              settings: #selector(openSettings), quit: #selector(quit))
+        d.onOpenWindow = { [weak self] in self?.openDashboardWindow() }
+        // The window may already be scanning processes: show its latest list right away.
+        if processMonitor != nil { d.processes.snapshot = lastProcesses }
     }
 
     /// Applies the desired macmon interval after a delay; a newer call replaces an older one.
@@ -187,22 +218,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
+    /// Process scanning runs while the menu is open or the window can be seen, and only then.
+    private func updateProcessMonitor() {
+        let needed = menuOpen || windowVisible
+        if needed, processMonitor == nil {
+            let pm = ProcessMonitor()
+            pm.onUpdate = { [weak self] snap in
+                guard let self else { return }
+                self.lastProcesses = snap
+                self.dashboard?.processes.snapshot = snap
+                self.dashboardWindow?.dashboard.processes.snapshot = snap
+            }
+            if let s = latest, s.diskRead.isFinite { pm.setTotalDisk(mbps: s.diskRead + s.diskWrite) }
+            pm.start(useHelper: Settings.shared.useRootHelper && RootHelper.isInstalled)
+            processMonitor = pm
+            if MemoryProbe.enabled { MemoryProbe.report("process scanning on") }
+        } else if !needed, let pm = processMonitor {
+            pm.stop()
+            processMonitor = nil
+            lastProcesses = nil
+            if MemoryProbe.enabled { MemoryProbe.report("process scanning off") }
+        }
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         menuOpen = true
         if MemoryProbe.enabled { MemoryProbe.report("menuWillOpen") }
-        let pm = ProcessMonitor()
-        pm.onUpdate = { [weak self] snap in self?.dashboard?.processes.snapshot = snap }
-        if let s = latest, s.diskRead.isFinite { pm.setTotalDisk(mbps: s.diskRead + s.diskWrite) }
-        pm.start(useHelper: Settings.shared.useRootHelper && RootHelper.isInstalled)
-        processMonitor = pm
+        updateProcessMonitor()
         applyInterval(after: 0.5)   // 1 s sampling once the menu stays open
     }
 
     func menuDidClose(_ menu: NSMenu) {
         menuOpen = false
         if MemoryProbe.enabled { MemoryProbe.report("menuDidClose") }
-        processMonitor?.stop()
-        processMonitor = nil
+        updateProcessMonitor()
         applyInterval(after: 10)    // back to the normal interval if it stays closed
         // Free the views after the chosen item's action (if any) has run.
         DispatchQueue.main.async { [weak self] in
@@ -210,6 +259,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.menu.removeAllItems()
             self.dashboard = nil
         }
+    }
+
+    // MARK: - Dashboard window
+
+    /// From the menu item or the button in the menu's tabs row.
+    @objc private func openDashboardWindow() {
+        menu.cancelTracking()
+        DispatchQueue.main.async { [weak self] in self?.showDashboardWindow(activate: true) }
+    }
+
+    /// While the window is open the app shows in the Dock and ⌘-Tab, so the window can always be
+    /// found; without it the app stays out of both.
+    private func showDashboardWindow(activate: Bool) {
+        if dashboardWindow == nil {
+            let wc = DashboardWindowController(history: history, latest: latest, hasBattery: macmon.hasBattery)
+            wc.onVisibilityChange = { [weak self] visible in self?.dashboardVisibilityChanged(visible) }
+            wc.onClose = { [weak self] in self?.dashboardWindowClosed() }
+            dashboardWindow = wc
+            UserDefaults.standard.set(true, forKey: Self.windowOpenKey)
+            NSApp.setActivationPolicy(.regular)
+        }
+        if activate { self.activate() }
+        dashboardWindow?.showWindow(nil)
+        if dashboardWindow?.window?.isMiniaturized == true { dashboardWindow?.window?.deminiaturize(nil) }
+        dashboardWindow?.updateVisible()
+    }
+
+    private func dashboardVisibilityChanged(_ visible: Bool) {
+        if MemoryProbe.enabled { MemoryProbe.report("window \(visible ? "visible" : "hidden")") }
+        if visible, let w = dashboardWindow {
+            // Updates stopped while it was hidden; the charts read the history when they draw.
+            if let s = latest { w.dashboard.update(sample: s) }
+            w.dashboard.charts.needsDisplay = true
+        }
+        updateProcessMonitor()
+        applyInterval(after: visible ? 0.5 : 10)
+    }
+
+    private func dashboardWindowClosed() {
+        guard !quitting else { return }
+        UserDefaults.standard.set(false, forKey: Self.windowOpenKey)
+        NSApp.setActivationPolicy(.accessory)
+        // Release it after the window has finished closing.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.dashboardWindow = nil
+            self.updateProcessMonitor()
+            self.applyInterval(after: 10)
+        }
+    }
+
+    /// The app menu shows only while the window is open (the app is a regular app then). It also
+    /// gives Settings' text fields copy and paste.
+    private func buildMainMenu() {
+        func item(_ title: String, _ action: Selector, _ key: String, target: AnyObject? = nil) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            i.target = target
+            return i
+        }
+        func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+            let m = NSMenu(title: title)
+            items.forEach(m.addItem)
+            let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            i.submenu = m
+            return i
+        }
+        let main = NSMenu()
+        main.addItem(submenu("MacMon Indicator", [
+            item("About MacMon Indicator", #selector(openAbout), "", target: self), .separator(),
+            item("Settings…", #selector(openSettings), ",", target: self), .separator(),
+            item("Hide MacMon Indicator", #selector(NSApplication.hide(_:)), "h"),
+            item("Quit MacMon Indicator", #selector(quit), "q", target: self),
+        ]))
+        main.addItem(submenu("Edit", [
+            item("Cut", #selector(NSText.cut(_:)), "x"), item("Copy", #selector(NSText.copy(_:)), "c"),
+            item("Paste", #selector(NSText.paste(_:)), "v"), item("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ]))
+        let window = submenu("Window", [
+            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+            item("Close", #selector(NSWindow.performClose(_:)), "w"),
+        ])
+        main.addItem(window)
+        NSApp.mainMenu = main
+        NSApp.windowsMenu = window.submenu
     }
 
     // MARK: - About, settings, export, quit

@@ -201,6 +201,8 @@ private final class LineReader {
         let disk = sensors.readDisk(now: s.time)
         s.diskRead = disk.read
         s.diskWrite = disk.write
+        s.diskReadOps = disk.readOps
+        s.diskWriteOps = disk.writeOps
         if let b = sensors.readBattery() {
             s.batteryW = b.watts
             s.batteryPct = b.pct

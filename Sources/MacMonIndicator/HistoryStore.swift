@@ -7,14 +7,15 @@ struct Tier {
     let capacity: Int
 }
 
-/// Fixed-size history kept in one memory-mapped file (~205 KB, never grows).
+/// Fixed-size history kept in one memory-mapped file (~238 KB, never grows).
 /// Each bucket stores avg + max per series. Updating history is just writing memory;
 /// the kernel writes dirty pages back to disk, and we nudge it once a minute.
 /// Partially filled buckets live in the file too, so a restart continues where it left off.
 /// Main thread only.
 final class HistoryStore {
-    /// Display order is array order. The file records each tier's shape, so tiers can be added or
-    /// reordered later: matching tiers are copied over when the layout changes (see `migrate`).
+    /// Display order is array order. The file records each tier's shape and the series count, so
+    /// tiers can be added or reordered and series appended later: matching tiers are copied over
+    /// when the layout changes (see `migrate`).
     static let tiers = [
         Tier(label: "5m", bucket: 5, capacity: 60),        // 5 s buckets
         Tier(label: "1h", bucket: 10, capacity: 360),      // 10 s
@@ -88,26 +89,31 @@ final class HistoryStore {
         }
         if oldLayout != Self.layout {
             reset()
-            if let old, let oldLayout, oldLayout.nSeries == Self.nSeries { migrate(from: old, layout: oldLayout) }
+            if let old, let oldLayout { migrate(from: old, layout: oldLayout) }
         }
     }
 
     /// Copies every tier that exists in both layouts (same bucket and capacity) from an old file.
+    /// Series are only ever appended, so the old file's series are the first ones here; series it
+    /// doesn't have start empty (and series it has beyond ours, from a newer version, are dropped).
     private func migrate(from old: Data, layout ol: Layout) {
-        let n = Self.nSeries
+        let n = Self.nSeries, on = ol.nSeries, common = min(n, on)
         var copied: [String] = []
         old.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
             guard let s = src.baseAddress else { return }
             for (t, shape) in Self.layout.tiers.enumerated() {
                 guard let o = ol.tiers.firstIndex(of: shape) else { continue }
                 memcpy(base + Self.stateOffset + t * 16, s + ol.stateOffset + o * 16, 16)
-                memcpy(base + Self.accOffset + t * n * 16, s + ol.accOffset + o * n * 16, n * 16)
-                memcpy(base + Self.ringOffsets[t], s + ol.ringOffset(o), shape.capacity * n * 8)
+                memcpy(base + Self.accOffset + t * n * 16, s + ol.accOffset + o * on * 16, common * 16)
+                for k in common..<n { accPtr(t, k).storeBytes(of: -Float.infinity, toByteOffset: 12, as: Float.self) }
+                for slot in 0..<shape.capacity {
+                    memcpy(base + Self.ringOffsets[t] + slot * n * 8, s + ol.ringOffset(o) + slot * on * 8, common * 8)
+                }
                 copied.append(Self.tiers[t].label)
             }
         }
         flush(sync: true)
-        log.notice("history file layout changed; kept tiers: \(copied.joined(separator: ", "), privacy: .public)")
+        log.notice("history file layout changed (\(on) → \(n) series); kept tiers: \(copied.joined(separator: ", "), privacy: .public)")
     }
 
     deinit { flush(sync: true) }

@@ -26,6 +26,8 @@ struct Sample {
     var fanCount: Int = 0
     var diskRead: Float = .nan     // MB/s
     var diskWrite: Float = .nan
+    var diskReadOps: Float = .nan  // operations per second
+    var diskWriteOps: Float = .nan
 
     var ramPct: Float { ramTotalGB > 0 ? ramUsedGB / ramTotalGB * 100 : .nan }
 
@@ -49,6 +51,8 @@ struct Sample {
         case .fan1: return fan1
         case .diskRead: return diskRead
         case .diskWrite: return diskWrite
+        case .diskReadOps: return diskReadOps
+        case .diskWriteOps: return diskWriteOps
         }
     }
 }
@@ -57,6 +61,7 @@ struct Sample {
 enum Series: Int, CaseIterable {
     case cpu, ecpu, pcpu, gpu, ram, swap, cpuPower, gpuPower, anePower, sysPower
     case batteryW, batteryPct, cpuTemp, gpuTemp, fan0, fan1, diskRead, diskWrite
+    case diskReadOps, diskWriteOps
 
     var csvName: String {
         switch self {
@@ -78,6 +83,8 @@ enum Series: Int, CaseIterable {
         case .fan1: return "fan1_rpm"
         case .diskRead: return "disk_read_mbs"
         case .diskWrite: return "disk_write_mbs"
+        case .diskReadOps: return "disk_read_ops"
+        case .diskWriteOps: return "disk_write_ops"
         }
     }
 }
@@ -86,7 +93,7 @@ enum Level: Int { case normal, warn, critical }
 
 /// Metrics that can be placed in the menu bar.
 enum BarMetric: String, CaseIterable {
-    case cpu, gpu, ram, ramGB, swap, power, cpuPower, gpuPower, battery, batteryPct, cpuTemp, gpuTemp, fan, disk
+    case cpu, gpu, ram, ramGB, swap, power, cpuPower, gpuPower, battery, batteryPct, cpuTemp, gpuTemp, fan, disk, diskOps
 
     var title: String {
         switch self {
@@ -104,6 +111,7 @@ enum BarMetric: String, CaseIterable {
         case .gpuTemp: return "GPU temperature"
         case .fan: return "Fan speed"
         case .disk: return "Disk read + write"
+        case .diskOps: return "Disk operations"
         }
     }
 
@@ -119,6 +127,7 @@ enum BarMetric: String, CaseIterable {
         case .cpuTemp, .gpuTemp: return "thermometer.medium"
         case .fan: return "fanblades"
         case .disk: return "internaldrive"
+        case .diskOps: return "internaldrive.fill"
         }
     }
 
@@ -132,6 +141,7 @@ enum BarMetric: String, CaseIterable {
         case .cpuTemp, .gpuTemp: return "100°"
         case .fan: return "8.8k"
         case .disk: return "888M"
+        case .diskOps: return "888k"
         }
     }
 
@@ -151,6 +161,7 @@ enum BarMetric: String, CaseIterable {
         case .gpuTemp: return Fmt.temp(s.gpuTemp)
         case .fan: return Fmt.rpmShort(Self.fanValue(s))
         case .disk: return Fmt.mbShort(s.diskRead + s.diskWrite)
+        case .diskOps: return Fmt.ops(s.diskReadOps + s.diskWriteOps)
         }
     }
 
@@ -188,6 +199,7 @@ enum BarMetric: String, CaseIterable {
         case .gpuTemp: return s.gpuTemp
         case .fan: return Self.fanValue(s)
         case .disk: return s.diskRead + s.diskWrite
+        case .diskOps: return s.diskReadOps + s.diskWriteOps
         }
     }
 
@@ -202,6 +214,7 @@ enum BarMetric: String, CaseIterable {
         case .power, .cpuPower, .gpuPower, .battery: return max(0.5, a * 0.15)
         case .fan: return max(100, a * 0.1)
         case .disk: return max(1, a * 0.25)
+        case .diskOps: return max(100, a * 0.25)
         }
     }
 
@@ -246,6 +259,16 @@ enum Fmt {
         if v >= 999.5 { return String(format: "%.1fG", v / 1000) }
         return v < 9.95 ? String(format: "%.1fM", v) : String(format: "%.0fM", v)
     }
+    /// Operations per second: "730", "8.9k", "42k".
+    static func ops(_ v: Float) -> String {
+        guard v.isFinite else { return dash }
+        if v < 999.5 { return "\(Int(v.rounded()))" }
+        if v < 9950 {
+            let k = String(format: "%.1f", v / 1000)
+            return (k.hasSuffix(".0") ? String(k.dropLast(2)) : k) + "k"
+        }
+        return String(format: "%.0fk", v / 1000)
+    }
     /// Plain number: one decimal below 10, none above.
     static func num(_ v: Float) -> String {
         guard v.isFinite else { return dash }
@@ -255,6 +278,16 @@ enum Fmt {
         if b >= 1e9 { return String(format: "%.1fG", b / 1e9) }
         if b >= 1e6 { return String(format: "%.0fM", b / 1e6) }
         return String(format: "%.0fK", b / 1e3)
+    }
+    /// Time in compact units: "8.2s", "42s", "12m 05s", "3h 12m", "2d 04h".
+    static func duration(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return dash }
+        if s < 9.95 { return String(format: "%.1fs", s) }
+        let t = Int(s.rounded())
+        if t < 60 { return "\(t)s" }
+        if t < 3600 { return String(format: "%dm %02ds", t / 60, t % 60) }
+        if t < 86400 { return String(format: "%dh %02dm", t / 3600, t % 3600 / 60) }
+        return String(format: "%dd %02dh", t / 86400, t % 86400 / 3600)
     }
     static func rate(_ bps: Double?) -> String {
         guard let b = bps else { return dash }

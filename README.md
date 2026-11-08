@@ -21,11 +21,17 @@ _Screenshots use demo history and demo process names._
   RAM and Temp bars blend into red as they near your warning limits, and values past a limit show
   in red. Hover to read values at any moment. **Click a chart** to see it alone at full width with its
   scale; click again to go back. Chart height is adjustable.
-- **Top processes**: CPU, RAM and disk. By default you get the top 2 of each; click a column to see
-  the top 6 by that column (click again to go back).
-- **Battery** charge/discharge watts, **disk** read/write throughput.
+- **Top processes**: CPU, CPU time, RAM and disk. By default you get the top 2 by CPU, RAM and disk;
+  click a column to see the top 6 by that column (click again to go back).
+- **Dashboard window**: click the window button next to "Now" in the menu (or **Open in Window**)
+  to keep the charts and processes on screen. Resize it and the charts grow and the process list
+  shows up to 20 rows. It reopens where you left it, also after login. While it's open the app
+  shows in the Dock and ⌘-Tab; close it and the app goes back to the menu bar only.
+- **Battery** charge/discharge watts, **disk** read/write throughput and **disk operations** per
+  second. Many small reads or writes (a big `git status`, an indexer, a package install) can slow
+  the whole Mac while the MB/s stay low; the **Disk ops** chart shows them.
 - **Optional root mode** to see disk use of system processes (Spotlight, Time Machine, …).
-- Starts at login, no Dock icon, stays out of the way.
+- Starts at login, no Dock icon (unless the dashboard window is open), stays out of the way.
 
 ## Requirements
 
@@ -75,7 +81,7 @@ Other commands: `make app` (build only, into `build/`), `make run`, `make uninst
 
 ## Using it
 
-- **Click** (left or right): the menu with charts, top processes, **About**, **Settings… (⌘,)** and **Quit (⌘Q)**. About shows the version and the macmon version in use.
+- **Click** (left or right): the menu with charts, top processes, **Open in Window**, **About**, **Settings… (⌘,)** and **Quit (⌘Q)**. About shows the version and the macmon version in use.
 - **Settings**: menu bar slots, icons, one or two lines, text size, spacing, edge padding and opacity
   (the menu bar updates live while you drag), menu charts (which, order, columns, value position, height), update interval (on power / on battery), warning limits, launch at
   login, free memory while the display sleeps, root mode, CSV export.
@@ -90,8 +96,11 @@ Measured on a MacBook Pro M4 Pro, on battery, 5 s interval, menu closed:
 | macmon | 0.30% | 11 MB |
 | **Total** | **~0.5–0.7%** | **~22–31 MB** |
 
-At the default 2 s interval on power, expect roughly twice the CPU. While the menu is open it
-samples every second and scans processes every 2 s. macOS also uses up to ~170 MB of graphics memory
+At the default 2 s interval on power, expect roughly twice the CPU. While the menu is open, or the
+dashboard window can be seen, it samples every second and scans processes every 2 s (about 2% of
+one core). A minimized, covered or hidden window costs nothing: updates pause until it shows again.
+A bigger window doesn't draw slower (about 1 ms per update at any size); it needs a few MB more for
+its picture. While you drag its edge it lays out and redraws only when you pause or let go. macOS also uses up to ~170 MB of graphics memory
 for the menu's glass window and frees it 20 to 40 s after the menu closes. The first time the menu is
 drawn, macOS sets up the menu machinery (the glass effect, layout, fonts), which adds a few MB that
 stay. It doesn't grow on later opens, and all of the app's own menu objects are freed on close.
@@ -117,10 +126,10 @@ How it stays small:
   itself) that is replaced only when the text or color changes. **Ignore small changes** (on by
   default) keeps a number until it moves by a noticeable step or is a minute old. Warnings always
   show immediately, and the menu always shows exact values. This cut the app's CPU from 0.42% to 0.18%.
-- **Adaptive interval:** 1 s while the menu is open, your setting on power or battery,
+- **Adaptive interval:** 1 s while the menu is open or the window can be seen, your setting on power or battery,
   10 s while the displays sleep, stopped during system sleep. Changes are debounced: sweeping the
   mouse along the menu bar opens and closes menus, and that doesn't restart macmon.
-- **Process scanning runs only while the menu is open.**
+- **Process scanning runs only while the menu is open or the window can be seen.**
 - **Space-efficient malloc.** The app's Info.plist sets `MallocSpaceEfficient=1`, so freed memory
   goes back to macOS instead of staying cached in the app: about 3 MB less at launch and up to 18 MB
   less after the menu has been shown.
@@ -128,14 +137,14 @@ How it stays small:
   have been asleep for a minute, the app saves its history, launches a fresh copy of itself and
   quits. Nobody sees the menu bar item go and come back, and memory returns to launch level
   (about 11 MB footprint, 75 MB RSS). Turn it off with **Settings → Free memory while the display sleeps**.
-- **History is one fixed-size memory-mapped file** (~214 KB, never grows). Writing a sample is just a
+- **History is one fixed-size memory-mapped file** (~238 KB, never grows). Writing a sample is just a
   memory write, and the file is flushed once a minute.
 
 ## How it works
 
 ```
 macmon pipe -i <ms> ──JSON lines──▶ MacMonIndicator.app
-                                     ├─ + disk throughput, battery watts (IOKit, no root)
+                                     ├─ + disk throughput and operations, battery watts (IOKit, no root)
                                      ├─ status item (two-line grid)
                                      ├─ history: 5 round-robin tiers in history.bin
                                      │    5m @5s · 1h @10s · 24h @4min · 7d @30min · 30d @2h  (avg + max)
@@ -172,14 +181,24 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 
 - **CPU %** in the menu bar is the share of all cores that are busy (like Activity Monitor's total).
   In the process list it's % of **one** core, so a busy process can show more than 100%.
+- **CPU time** in the process list is the total CPU a process has used since it started, as in
+  Activity Monitor. Sort by it to find what has been busy all along, not just right now.
 - **GPU %** is frequency-weighted, as macmon reports it.
 - **Temperatures** are macmon's CPU/GPU averages. **Power** "System" is the whole machine.
 - **Battery** is + when charging and − when discharging.
-- **Disk** totals include every block device (internal and external).
-- **Chart scales**: CPU and GPU use 0–100%, Temp 0–100°, RAM 0 to total, and Power, Battery and Disk
-  0 to the highest value in view. Turn on **Settings → Zoom Temp and RAM** to scale those two to
-  the range their data covers. Small labels then show the highest and lowest values in view. A
-  dashed red line marks your warning limit whenever it falls inside the visible range.
+- **Disk** totals include every block device (internal and external). **Disk ops** counts the
+  read and write operations the drives carry out; idle is usually well under 1000 per second. The
+  process list can't show operations per process: macOS only reports bytes per process.
+  Small files that are already in memory never reach the drive, so they don't count here; reading
+  them shows up as CPU time instead.
+- **Chart scales**: CPU and GPU use 0–100%, Temp 0–100°, RAM 0 to total, and Fans 0 to the fans'
+  top speed. Power, Battery, Disk and Disk ops go from 0 to a round number above the highest
+  value in view (Disk ops at least 1000); the disk charts scale reads (top half) and writes (bottom
+  half) separately. Small labels in the chart's corners show the scale of Power, Battery, Disk,
+  Disk ops and Fans. Turn on **Settings → Zoom Temp and RAM**
+  to scale those two to the range their data covers; their labels then show the highest and lowest
+  values in view. A dashed red line marks your warning limit whenever it falls inside the visible
+  range.
 - **Warning colors** in the charts follow the value, not the bar's height, so they mean the same on
   any scale. Bars blend from the chart's own color into red over the last quarter of the scale
   below your limit (25 points for CPU, GPU and Temp, a quarter of total RAM), and are fully red at
@@ -217,6 +236,9 @@ to test the quiet restart: after the last cycle the app acts as if the displays 
 pointer still, while sweeping the charts, and while sweeping a zoomed chart (synthetic mouse events at
 120 Hz). `MACMON_DEBUG_PANEL=1` shows the charts in a floating panel at the bottom right instead of
 the menu, because an open menu takes the keyboard and typing elsewhere closes it.
+`MACMON_DEBUG_WINDOW=1` uses the dashboard window instead (it doesn't take focus): the same tests with
+clicks sent through the window, then three window sizes, then minimize and restore.
+`MACMON_INDICATOR_HISTORY_DIR=<dir>` keeps a test build away from your real history.
 `MACMON_DEBUG_RENDER=<dir>` also saves screen captures of the charts during the test.
 `--settings <dir>` renders the Settings window, light and dark.
 

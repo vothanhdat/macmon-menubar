@@ -5,6 +5,7 @@ struct ProcRow {
     let pid: pid_t
     let name: String
     var cpu: Double?   // % of one core
+    var cpuTime: Double // seconds of CPU used since the process started
     var mem: Double    // bytes
     var disk: Double?  // bytes/s, nil when not readable without root
 }
@@ -88,7 +89,7 @@ final class ProcessMonitor {
         var visibleDisk = 0.0
         snap.rows.reserveCapacity(raw.count)
         for (pid, r) in raw {
-            var row = ProcRow(pid: pid, name: r.name, cpu: nil, mem: r.mem, disk: nil)
+            var row = ProcRow(pid: pid, name: r.name, cpu: nil, cpuTime: Double(r.cpuNs) / 1e9, mem: r.mem, disk: nil)
             if havePrev, let p = prev[pid] {
                 row.cpu = r.cpuNs >= p.cpuNs ? Double(r.cpuNs - p.cpuNs) / dt * 100 : 0
                 if let d = r.disk, let pd = p.disk {

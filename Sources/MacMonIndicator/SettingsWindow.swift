@@ -90,7 +90,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         slotGrid.rowSpacing = 4
         slotGrid.columnSpacing = 6
 
-        // Menu charts: 8 positions, each a chart or None (this both hides and reorders charts).
+        // Menu charts: one position per chart, each a chart or None (this both hides and reorders charts).
         let charts = s.chartIDs
         for i in 0..<ChartID.allCases.count {
             let p = NSPopUpButton()
@@ -103,7 +103,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             p.action = #selector(chartsChanged)
             chartPopups.append(p)
         }
-        let chartGrid = NSGridView(views: stride(from: 0, to: chartPopups.count, by: 2).map { [chartPopups[$0], chartPopups[$0 + 1]] })
+        // Two per row, like the menu; with an odd number of charts the last row has one.
+        let chartGrid = NSGridView(views: stride(from: 0, to: chartPopups.count, by: 2).map {
+            [chartPopups[$0], $0 + 1 < chartPopups.count ? chartPopups[$0 + 1] : NSGridCell.emptyContentView]
+        })
         chartGrid.rowSpacing = 4
         chartGrid.columnSpacing = 6
         let layout = s.chartLayout

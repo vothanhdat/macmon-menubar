@@ -30,6 +30,20 @@ final class Settings {
             "useRootHelper": false,
             "quietRestart": true,
         ])
+        showNewCharts()
+    }
+
+    /// Charts added in a later version show up once, at the end, for people who already chose
+    /// their charts. Hiding one in Settings keeps it hidden.
+    private func showNewCharts() {
+        let all = ChartID.allCases.map(\.rawValue)
+        // Before this list was kept, the app had the first eight charts.
+        let known = d.stringArray(forKey: "chartIDsKnown") ?? Array(all.prefix(8))
+        guard known.count < all.count else { return }
+        let ids = d.stringArray(forKey: "chartIDs") ?? []
+        let added = all.filter { !known.contains($0) && !ids.contains($0) }
+        if !added.isEmpty { d.set(ids + added, forKey: "chartIDs") }
+        d.set(all, forKey: "chartIDsKnown")
     }
 
     private func notify() { NotificationCenter.default.post(name: Self.changed, object: nil) }

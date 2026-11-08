@@ -39,6 +39,9 @@ enum SnapshotMode {
                 busy.ramUsedGB = busy.ramTotalGB * 0.95
                 renderDashboard(history: history, sample: busy, procs: procSnap, hasBattery: source.hasBattery,
                                 appearance: appearance, to: "\(outputDir)/dropdown-warning-\(name).png")
+                // The dashboard window, larger than the menu.
+                renderWindow(history: history, sample: s, procs: procSnap, hasBattery: source.hasBattery,
+                             size: NSSize(width: 760, height: 900), appearance: appearance, to: "\(outputDir)/window-\(name).png")
             }
             pm.stop()
             try? FileManager.default.removeItem(at: tmp)
@@ -55,13 +58,17 @@ enum SnapshotMode {
 
     /// Fixed process list for public screenshots (so they don't show what you are running).
     private static func demoProcessSnapshot() -> ProcSnapshot {
-        let rows: [(String, Double, Double, Double?)] = [
-            ("Xcode", 48.2, 2.1e9, 1.2e6), ("WindowServer", 21.5, 2.6e8, nil), ("Safari", 6.1, 1.4e9, 0.3e6),
-            ("Docker", 3.4, 1.1e9, 0.2e6), ("Spotlight", 4.2, 9.0e7, 6.3e6), ("cloudd", 1.1, 6.0e7, 2.4e6),
+        let rows: [(String, Double, Double, Double, Double?)] = [
+            ("Xcode", 48.2, 8040, 2.1e9, 1.2e6), ("WindowServer", 21.5, 19860, 2.6e8, nil), ("Safari", 6.1, 2460, 1.4e9, 0.3e6),
+            ("Docker", 3.4, 3900, 1.1e9, 0.2e6), ("Spotlight", 4.2, 725, 9.0e7, 6.3e6), ("cloudd", 1.1, 48.3, 6.0e7, 2.4e6),
+            // Below the top 6 by every column, so only a taller window shows them.
+            ("Slack", 2.8, 5400, 6.5e8, 0.4e6), ("mds_stores", 3.1, 2900, 8.0e7, 1.9e6), ("Terminal", 2.1, 860, 1.2e8, nil),
+            ("Mail", 0.6, 2210, 3.1e8, 0.1e6), ("Finder", 0.8, 1520, 1.8e8, 0.05e6), ("Music", 0.9, 640, 2.2e8, 0),
+            ("kernel_task", 2.4, 31_400, 9.0e6, nil), ("Notes", 0.3, 310, 1.5e8, 0),
         ]
         var snap = ProcSnapshot()
         snap.rows = rows.enumerated().map { ProcRow(pid: pid_t(1000 + $0.offset), name: $0.element.0, cpu: $0.element.1,
-                                                   mem: $0.element.2, disk: $0.element.3) }
+                                                   cpuTime: $0.element.2, mem: $0.element.3, disk: $0.element.4) }
         snap.hiddenDiskBps = 1.8e6
         return snap
     }
@@ -90,6 +97,9 @@ enum SnapshotMode {
             d.fan1 = d.fan0
             d.diskRead = 3 * wave(t, 300) + (Int(t / 10) % 23 == 0 ? 80 : 0)
             d.diskWrite = 6 * wave(t, 450) + (Int(t / 10) % 29 == 0 ? 120 : 0)
+            // A burst of small-file reads every so often: many operations, few MB/s.
+            d.diskReadOps = 20 + 300 * wave(t, 300) + (Int(t / 10) % 17 == 0 ? 7400 : 0)
+            d.diskWriteOps = 60 + 250 * wave(t, 450) + (Int(t / 10) % 29 == 0 ? 1900 : 0)
             h.add(d)
             t += now - t > 3600 ? 120 : 10
         }
@@ -123,11 +133,25 @@ enum SnapshotMode {
 
     private static func renderDashboard(history: HistoryStore, sample: Sample, procs: ProcSnapshot?, hasBattery: Bool,
                                         appearance: NSAppearance.Name, to path: String) {
-        let d = DashboardMenu(history: history, latest: sample, hasBattery: hasBattery)
+        let d = Dashboard(history: history, latest: sample, hasBattery: hasBattery)
         d.update(sample: sample)
         d.processes.snapshot = procs
+        d.onOpenWindow = {} // shows the button, as in the menu
         // Approximates the menu's glass background; the real menu blurs what is behind it.
         let bg = appearance == .darkAqua ? NSColor(white: 0.2, alpha: 1) : NSColor(white: 0.96, alpha: 1)
+        write(d.snapshotView(), appearance: appearance, background: bg, padding: 0, to: path)
+    }
+
+    private static func renderWindow(history: HistoryStore, sample: Sample, procs: ProcSnapshot?, hasBattery: Bool,
+                                     size: NSSize, appearance: NSAppearance.Name, to path: String) {
+        let d = Dashboard(history: history, latest: sample, hasBattery: hasBattery, inWindow: true)
+        d.update(sample: sample)
+        d.processes.snapshot = procs
+        d.layout(windowSize: size)
+        var bg = NSColor.windowBackgroundColor
+        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+            bg = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? bg
+        }
         write(d.snapshotView(), appearance: appearance, background: bg, padding: 0, to: path)
     }
 
@@ -330,7 +354,7 @@ enum SnapshotMode {
         s.cpu = 9; s.ecpu = 14; s.pcpu = 6; s.gpu = 5; s.ramUsedGB = 15.1; s.ramTotalGB = 24; s.swapUsedGB = 0
         s.sysPower = 9.1; s.cpuPower = 0.9; s.gpuPower = 0.2; s.batteryW = -7.9; s.batteryPct = 43
         s.cpuTemp = 42; s.gpuTemp = 41; s.fan0 = 0; s.fan1 = 0; s.fanMax = 5777; s.fanCount = 2
-        s.diskRead = 0.1; s.diskWrite = 0.3
+        s.diskRead = 0.1; s.diskWrite = 0.3; s.diskReadOps = 2; s.diskWriteOps = 96
         seedDemoHistory(history, like: s)
         history.add(s)
 
@@ -340,7 +364,7 @@ enum SnapshotMode {
             ("C · 2 columns · value on label row", ChartLayout(columns: 2, value: .label)),
             ("D · 2 columns · main value in chart, details on label row", ChartLayout(columns: 2, value: .split)),
         ]
-        let w = DashboardMenu.width, margin: CGFloat = 16, labelH: CGFloat = 24, gap: CGFloat = 20
+        let w = Dashboard.width, margin: CGFloat = 16, labelH: CGFloat = 24, gap: CGFloat = 20
         let container = FlippedView()
         // Left column: A (tall). Right column: B, C, D.
         var colY: [CGFloat] = [margin, margin]

@@ -1,11 +1,11 @@
 import Foundation
 import IOKit
 
-/// Sensors macmon does not report: total disk throughput and battery power.
+/// Sensors macmon does not report: total disk throughput and operations, and battery power.
 /// Uses public IOKit registry properties only; no root needed.
 /// Not thread-safe: call from one queue.
 final class SystemSensors {
-    private var lastDisk: (read: UInt64, write: UInt64, time: TimeInterval)?
+    private var lastDisk: (read: UInt64, write: UInt64, readOps: UInt64, writeOps: UInt64, time: TimeInterval)?
     private let battery: io_service_t
 
     init() {
@@ -16,28 +16,36 @@ final class SystemSensors {
 
     var hasBattery: Bool { battery != 0 }
 
-    /// Disk read/write in MB/s since the previous call (summed over all block devices).
-    func readDisk(now: TimeInterval) -> (read: Float, write: Float) {
+    /// Disk read/write in MB/s, and read/write operations per second, since the previous call
+    /// (summed over all block devices). Many small reads or writes show up as many operations
+    /// even when the MB/s stay low.
+    func readDisk(now: TimeInterval) -> (read: Float, write: Float, readOps: Float, writeOps: Float) {
+        let none: (Float, Float, Float, Float) = (.nan, .nan, .nan, .nan)
         var iter: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &iter) == KERN_SUCCESS else {
-            return (.nan, .nan)
+            return none
         }
         defer { IOObjectRelease(iter) }
-        var r: UInt64 = 0, w: UInt64 = 0
+        var r: UInt64 = 0, w: UInt64 = 0, ro: UInt64 = 0, wo: UInt64 = 0
         var service = IOIteratorNext(iter)
         while service != 0 {
             if let stats = IORegistryEntryCreateCFProperty(service, "Statistics" as CFString, kCFAllocatorDefault, 0)?
                 .takeRetainedValue() as? [String: Any] {
-                r &+= (stats["Bytes (Read)"] as? NSNumber)?.uint64Value ?? 0
-                w &+= (stats["Bytes (Write)"] as? NSNumber)?.uint64Value ?? 0
+                func count(_ key: String) -> UInt64 { (stats[key] as? NSNumber)?.uint64Value ?? 0 }
+                r &+= count("Bytes (Read)")
+                w &+= count("Bytes (Write)")
+                ro &+= count("Operations (Read)")
+                wo &+= count("Operations (Write)")
             }
             IOObjectRelease(service)
             service = IOIteratorNext(iter)
         }
-        defer { lastDisk = (r, w, now) }
-        guard let last = lastDisk, now > last.time, r >= last.read, w >= last.write else { return (.nan, .nan) }
+        defer { lastDisk = (r, w, ro, wo, now) }
+        guard let last = lastDisk, now > last.time, r >= last.read, w >= last.write,
+              ro >= last.readOps, wo >= last.writeOps else { return none }
         let dt = now - last.time
-        return (Float(Double(r - last.read) / dt / 1e6), Float(Double(w - last.write) / dt / 1e6))
+        let rate = { (a: UInt64, b: UInt64) in Float(Double(a - b) / dt) }
+        return (rate(r, last.read) / 1e6, rate(w, last.write) / 1e6, rate(ro, last.readOps), rate(wo, last.writeOps))
     }
 
     /// Battery power (W, + charging / − discharging), level (%), and whether external power is connected.

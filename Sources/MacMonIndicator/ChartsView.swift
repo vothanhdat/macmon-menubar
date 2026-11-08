@@ -2,7 +2,7 @@ import AppKit
 
 /// Charts the user can show in the menu, in their chosen order.
 enum ChartID: String, CaseIterable {
-    case cpu, gpu, ram, power, battery, temp, fans, disk
+    case cpu, gpu, ram, power, battery, temp, fans, disk, diskOps
 
     var title: String {
         switch self {
@@ -14,6 +14,7 @@ enum ChartID: String, CaseIterable {
         case .temp: return "Temp"
         case .fans: return "Fans"
         case .disk: return "Disk"
+        case .diskOps: return "Disk ops"
         }
     }
 }
@@ -57,7 +58,8 @@ final class ChartsView: NSView {
         let color2: NSColor?
         /// Main value (e.g. "9.1W") and optional details (e.g. "CPU 0.9 · GPU 0.2").
         let text: (_ value: (Series) -> Float, _ live: Sample?) -> (main: String, detail: String?)
-        /// Formats axis labels: the data's min/max on smart-scaled charts, the scale on a zoomed chart.
+        /// Formats axis labels: the data's min/max on smart-scaled charts, the scale on charts whose
+        /// scale isn't a fixed full range (see `labelsScale`) and on a zoomed chart.
         private(set) var axisLabel: ((Float) -> String)?
         /// Warning limit drawn as a dashed line when it falls inside the visible range.
         private(set) var limit: ((Thresholds, Sample?) -> Float?)?
@@ -78,7 +80,7 @@ final class ChartsView: NSView {
         }
     }
 
-    private static let inset = DashboardMenu.inset, colGap: CGFloat = 10
+    private static let inset = Dashboard.inset, colGap: CGFloat = 10
     private static let titleH: CGFloat = 12, chartGap: CGFloat = 1, cellGap: CGFloat = 5
     /// A zoomed chart takes the grid's place, and is at least this tall.
     private static let minZoomedHeight: CGFloat = 150
@@ -89,6 +91,13 @@ final class ChartsView: NSView {
         let rows = (count + layout.columns - 1) / max(1, layout.columns)
         let grid = CGFloat(rows) * cellH(layout) - cellGap + 2
         return zoomed ? max(grid, minZoomedHeight) : grid
+    }
+
+    /// The tallest whole-point chart height at which `count` charts fit in `height` (the inverse of
+    /// `height(count:layout:)`), for a window that gives the charts its space.
+    static func chartHeight(fitting height: CGFloat, count: Int, layout: ChartLayout) -> CGFloat {
+        let rows = CGFloat(max(1, (count + layout.columns - 1) / max(1, layout.columns)))
+        return floor((height - 2 + cellGap) / rows - titleH - chartGap - cellGap)
     }
 
     var rows: [Row] = [] {
@@ -131,7 +140,9 @@ final class ChartsView: NSView {
     private var avgBuf: [Float] = [], maxBuf: [Float] = [], avgBuf2: [Float] = [], maxBuf2: [Float] = []
     private var fitScale = false // Settings.zoomCharts, read once per draw
     private let titleFont = NSFont.systemFont(ofSize: 10, weight: .medium)
-    private let axisFont = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .regular)
+    private let axisAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .regular),
+                                                            .foregroundColor: NSColor.secondaryLabelColor]
+    private lazy var axisLabelH = ceil(("0" as NSString).size(withAttributes: axisAttrs).height) - 1
     private let mainAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
                                                             .foregroundColor: NSColor.labelColor]
     private let detailAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
@@ -151,6 +162,8 @@ final class ChartsView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var isFlipped: Bool { true }
+    /// In a window that isn't in front, the first click already zooms.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
@@ -267,6 +280,9 @@ final class ChartsView: NSView {
                 history.window(tier: tier, series: down, now: now, avg: &avgBuf2, max: &maxBuf2)
             }
             let r = range(row)
+            // The lower half of a mirrored chart (disk writes) has its own scale.
+            var lowerHi = r.hi
+            if case .mirrored = row.shape { lowerHi = range(row, lowerHalf: true).hi }
             let limit = row.limit?(thresholds, latest)
             switch row.shape {
             case .up:
@@ -277,7 +293,7 @@ final class ChartsView: NSView {
                 var top = rect; top.size.height /= 2
                 var bottom = top; bottom.origin.y += top.height
                 drawBars(ctx, top, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .bottom)
-                drawBars(ctx, bottom, bw, avgBuf2, maxBuf2, 0, r.hi, row.color2 ?? row.color, from: .top)
+                drawBars(ctx, bottom, bw, avgBuf2, maxBuf2, 0, lowerHi, row.color2 ?? row.color, from: .top)
             }
 
             // Warning limit as a dashed line, if it is inside the visible range.
@@ -291,25 +307,23 @@ final class ChartsView: NSView {
             }
 
             // Axis labels: smart-scaled charts don't start at zero, so they show what the top and
-            // bottom mean; a zoomed chart shows its scale.
+            // bottom mean. Charts whose scale follows the data or the Mac show it, as does a zoomed chart.
             var top: String?, bottom: String?
             if let fmt = row.axisLabel {
                 if r.dataMin.isFinite, r.dataMax.isFinite {
                     top = fmt(r.dataMax); bottom = fmt(r.dataMin)
-                } else if isZoomed {
+                } else if isZoomed || Self.labelsScale(row.scale) {
                     top = fmt(r.hi)
                     switch row.shape {
                     case .up: break
                     case .signed: bottom = fmt(-r.hi)
-                    case .mirrored: bottom = fmt(r.hi)
+                    case .mirrored: bottom = fmt(lowerHi)
                     }
                 }
             }
-            let a: [NSAttributedString.Key: Any] = [.font: axisFont, .foregroundColor: NSColor.secondaryLabelColor]
-            (top as NSString?)?.draw(at: NSPoint(x: rect.minX + 3, y: rect.minY), withAttributes: a)
-            if let low = bottom as NSString? {
-                low.draw(at: NSPoint(x: rect.minX + 3, y: rect.maxY - low.size(withAttributes: a).height), withAttributes: a)
-            }
+            if let top { drawAxisLabel(ctx, top, in: rect, atTop: true) }
+            // A very short chart has room for one label only.
+            if let bottom, top == nil || rect.height >= 2 * axisLabelH + 6 { drawAxisLabel(ctx, bottom, in: rect, atTop: false) }
             ctx.restoreGState()
 
             if offscreen {
@@ -318,6 +332,18 @@ final class ChartsView: NSView {
                 if let chip = v.chip { drawChip(chip, at: chipRect(chip, in: rect), hot: v.hot) }
             }
         }
+    }
+
+    /// An axis label in the chart's top- or bottom-left corner, on a translucent backing like the
+    /// value chip so it stays readable over the bars.
+    private func drawAxisLabel(_ ctx: CGContext, _ text: String, in rect: CGRect, atTop: Bool) {
+        let w = (text as NSString).size(withAttributes: axisAttrs).width
+        let box = CGRect(x: rect.minX + 2, y: atTop ? rect.minY + 1.5 : rect.maxY - axisLabelH - 1.5,
+                         width: w + 4, height: axisLabelH)
+        ctx.setFillColor(NSColor.windowBackgroundColor.withAlphaComponent(0.6).cgColor)
+        ctx.addPath(CGPath(roundedRect: box, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil))
+        ctx.fillPath()
+        (text as NSString).draw(at: NSPoint(x: box.minX + 2, y: box.minY), withAttributes: axisAttrs)
     }
 
     // MARK: - Cursor and values
@@ -469,34 +495,52 @@ final class ChartsView: NSView {
         }
     }
 
-    /// Visible value range for a row, plus the data's own min/max (for smart-scale labels).
-    private func range(_ row: Row) -> (lo: Float, hi: Float, dataMin: Float, dataMax: Float) {
-        range(row, row.scale)
+    /// Visible value range for a row (or for the lower half of a mirrored chart), plus the data's
+    /// own min/max (for smart-scale labels).
+    private func range(_ row: Row, lowerHalf: Bool = false) -> (lo: Float, hi: Float, dataMin: Float, dataMax: Float) {
+        lowerHalf ? range(row.scale, avgBuf2, maxBuf2) : range(row.scale, avgBuf, maxBuf)
     }
 
-    private func range(_ row: Row, _ scale: Scale) -> (lo: Float, hi: Float, dataMin: Float, dataMax: Float) {
+    private func range(_ scale: Scale, _ avgs: [Float], _ peaks: [Float]) -> (lo: Float, hi: Float, dataMin: Float, dataMax: Float) {
         let maxAbs = { (b: [Float]) in b.lazy.filter(\.isFinite).map { abs($0) }.max() ?? 0 }
         switch scale {
         case .fixed(let v):
             return (0, v, .nan, .nan)
         case .ramTotal:
-            return (0, latest?.ramTotalGB ?? max(1, maxAbs(maxBuf)), .nan, .nan)
+            return (0, latest?.ramTotalGB ?? max(1, maxAbs(peaks)), .nan, .nan)
         case .fanMax:
             return (0, (latest?.fanMax).flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 6000, .nan, .nan)
         case .auto(let minV):
-            var m = maxAbs(maxBuf)
-            if case .mirrored = row.shape { m = max(m, maxAbs(maxBuf2)) }
-            return (0, max(minV, m * 1.1), .nan, .nan)
+            return (0, Self.roundUp(max(minV, maxAbs(peaks) * 1.05)), .nan, .nan)
         case .smart(_, let otherwise) where !fitScale:
-            return range(row, otherwise)
+            return range(otherwise, avgs, peaks)
         case .smart(let minSpan, _):
-            let lows = avgBuf.filter(\.isFinite), highs = maxBuf.filter(\.isFinite)
+            let lows = avgs.filter(\.isFinite), highs = peaks.filter(\.isFinite)
             guard let dMin = lows.min(), let dMax = highs.max() ?? lows.max() else { return (0, 1, .nan, .nan) }
             var lo = dMin, hi = max(dMax, dMin)
             if hi - lo < minSpan { let mid = (lo + hi) / 2; lo = mid - minSpan / 2; hi = mid + minSpan / 2 }
             let pad = (hi - lo) * 0.12
             return (max(0, lo - pad), hi + pad, dMin, dMax)
         }
+    }
+
+    /// Whether the grid labels a chart's scale: only scales that follow the data (power, battery,
+    /// disk) or the Mac (fan max). 0–100% charts, temperature (0–100°) and RAM (0 to total) need
+    /// none. With "Zoom Temp and RAM" on, those show the data's min and max instead.
+    private static func labelsScale(_ scale: Scale) -> Bool {
+        switch scale {
+        case .auto, .fanMax: return true
+        case .fixed, .ramTotal: return false
+        case .smart(_, let otherwise): return labelsScale(otherwise)
+        }
+    }
+
+    /// The next round number up (1, 1.5, 2, 2.5, 3, 4, 5, 6 or 8 times a power of ten), so a
+    /// scale label reads "20W", not "17.3W".
+    static func roundUp(_ v: Float) -> Float {
+        guard v > 0, v.isFinite else { return v }
+        let p = pow(10, floor(log10(v)))
+        return ([1, 1.5, 2, 2.5, 3, 4, 5, 6, 8] as [Float]).first { $0 * p >= v * 0.9999 }.map { $0 * p } ?? 10 * p
     }
 
     private enum Anchor { case bottom, top, center }
@@ -510,7 +554,7 @@ final class ChartsView: NSView {
         guard let limit, limit > 0 else { return nil }
         var full = row.scale
         if case .smart(_, let otherwise) = full { full = otherwise }
-        return (max(0, limit - Self.warnBand * range(row, full).hi), limit)
+        return (max(0, limit - Self.warnBand * range(full, avgBuf, maxBuf).hi), limit)
     }
 
     /// Bars per bucket, no smoothing: a faint layer for the bucket max, a gradient fill for the
@@ -704,7 +748,14 @@ extension ChartsView {
                 return Row(id: id, series: .diskRead, shape: .mirrored(.diskWrite), scale: .auto(min: 10),
                            color: .systemBlue, color2: .systemTeal) { v, _ in
                     ("R " + Fmt.num(v(.diskRead)) + " · W " + Fmt.num(v(.diskWrite)) + " MB/s", nil)
-                }.with(axis: { Fmt.num($0) + " MB/s" })
+                }.with(axis: { $0 >= 999.5 ? Fmt.num($0 / 1000) + " GB/s" : Fmt.num($0) + " MB/s" })
+            case .diskOps:
+                // Operations per second: many small reads or writes slow the Mac down while the
+                // MB/s stay low. Idle is usually well under 1000.
+                return Row(id: id, series: .diskReadOps, shape: .mirrored(.diskWriteOps), scale: .auto(min: 1000),
+                           color: .systemBlue, color2: .systemTeal) { v, _ in
+                    ("R " + Fmt.ops(v(.diskReadOps)) + " · W " + Fmt.ops(v(.diskWriteOps)) + " ops/s", nil)
+                }.with(axis: { Fmt.ops($0) + " ops/s" })
             }
         }
     }
