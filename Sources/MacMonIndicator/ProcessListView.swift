@@ -1,14 +1,14 @@
 import AppKit
 
-/// Top processes table. With no sort column chosen it shows the top few by CPU, RAM and disk
-/// (2 each in the menu's 6 rows); clicking a column header shows the top ones by that column
-/// (click again to go back). A tall window shows more rows.
+/// Top processes table. With no sort column chosen it shows the top few by each column (2 each in
+/// the menu's 10 rows); clicking a column header shows the top ones by that column (click again
+/// to go back). A tall window shows more rows.
 final class ProcessListView: NSView {
     /// Raw values are saved in the settings, so new columns get new numbers.
-    enum Sort: Int { case cpu, ram, disk, time }
+    enum Sort: Int { case cpu, ram, disk, time, syscalls }
 
     static let headerH: CGFloat = 20, rowH: CGFloat = 17, noteH: CGFloat = 16
-    static let defaultRows = 6
+    static let defaultRows = 10
     static let minDiskBps = 50_000.0 // below this the column shows "0"
     static func height(rows: Int) -> CGFloat { headerH + rowH * CGFloat(rows) + noteH + 4 }
     static var height: CGFloat { height(rows: defaultRows) }
@@ -26,8 +26,10 @@ final class ProcessListView: NSView {
 
     private let inset = Dashboard.inset
     /// Columns left to right. CPU time is the total since the process started, as in Activity Monitor.
+    /// Syscalls are system calls per second (your processes only), the per-process sign of heavy
+    /// file work: macOS doesn't count disk operations per process.
     private let columns: [(sort: Sort, title: String, width: CGFloat)] = [
-        (.cpu, "CPU", 48), (.time, "CPU time", 64), (.ram, "RAM", 50), (.disk, "Disk", 58),
+        (.cpu, "CPU", 46), (.time, "CPU time", 62), (.ram, "RAM", 46), (.disk, "Disk", 56), (.syscalls, "Syscalls", 60),
     ]
     private let font = NSFont.systemFont(ofSize: 11)
     private let numFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
@@ -50,6 +52,7 @@ final class ProcessListView: NSView {
         case .ram: return r.mem
         case .disk: return r.disk ?? -1
         case .time: return r.cpuTime
+        case .syscalls: return r.syscalls ?? -1
         }
     }
 
@@ -60,16 +63,18 @@ final class ProcessListView: NSView {
         } else {
             var out: [(ProcRow, Sort)] = []
             var seen = Set<pid_t>()
-            let each = max(2, rowCount / 3)
-            for s in [Sort.cpu, .ram, .disk] {
+            // The top few by each column, left to right; a process counts for the first column it tops.
+            let each = max(2, rowCount / columns.count)
+            for s in columns.map(\.sort) {
                 var n = 0
                 for r in rows.sorted(by: { key($0, s) > key($1, s) }) where !seen.contains(r.pid) {
                     if s == .disk && (r.disk ?? 0) < Self.minDiskBps { break } // ignore idle disk users
+                    if s == .syscalls && r.syscalls == nil { break }        // not known yet, or a system process
                     out.append((r, s)); seen.insert(r.pid); n += 1
                     if n == each { break }
                 }
             }
-            if out.count < rowCount { // nothing using disk: fill with the next CPU users
+            if out.count < rowCount { // e.g. nothing using disk: fill with the next CPU users
                 for r in rows.sorted(by: { key($0, .cpu) > key($1, .cpu) }) where !seen.contains(r.pid) {
                     out.append((r, .cpu)); seen.insert(r.pid)
                     if out.count == rowCount { break }
@@ -127,6 +132,7 @@ final class ProcessListView: NSView {
                 case .time: text = Fmt.duration(r.cpuTime)
                 case .ram: text = Fmt.bytes(r.mem)
                 case .disk: text = Fmt.rate(r.disk)
+                case .syscalls: text = r.syscalls.map { Fmt.ops(Float($0)) } ?? Fmt.dash
                 }
                 let strong = item.reason == col.sort
                 drawRight(text, x: columnX(c), w: col.width, y: y + 1,

@@ -8,6 +8,8 @@ struct ProcRow {
     var cpuTime: Double // seconds of CPU used since the process started
     var mem: Double    // bytes
     var disk: Double?  // bytes/s, nil when not readable without root
+    /// Unix system calls per second (opening, reading, listing files and more): your processes only.
+    var syscalls: Double? = nil
 }
 
 struct ProcSnapshot {
@@ -18,16 +20,22 @@ struct ProcSnapshot {
     var helperFailed = false
 }
 
-/// Samples per-process CPU, memory and disk I/O. Runs only while the menu is open.
-/// - Your processes: libproc (exact CPU time, memory footprint, disk bytes).
+/// Samples per-process CPU, memory, disk I/O and system calls. Runs only while the menu is open
+/// or the dashboard window can be seen.
+/// - Your processes: libproc (exact CPU time, memory footprint, disk bytes, system calls).
 /// - Other users' / system processes: /bin/ps (CPU time + RSS; it has root rights), disk unknown.
-/// - Root mode: the helper daemon returns everything for every process.
+/// - Root mode: the helper daemon returns everything for every process, except system calls,
+///   which stay limited to your processes.
+///
+/// macOS counts disk bytes per process but not disk operations. System calls are the closest:
+/// a process walking or reading many small files makes hundreds of thousands a second, while
+/// busy apps at rest make a few thousand. They also catch file work served from memory.
 final class ProcessMonitor {
     var onUpdate: ((ProcSnapshot) -> Void)?
 
     private let queue = DispatchQueue(label: "MacMonIndicator.procmon", qos: .utility)
     private var timer: DispatchSourceTimer?
-    private var prev: [pid_t: (cpuNs: UInt64, disk: UInt64?)] = [:]
+    private var prev: [pid_t: (cpuNs: UInt64, disk: UInt64?, syscalls: UInt32?)] = [:]
     private var prevTime: UInt64 = 0
     private let me = getuid()
     private let timebase: (numer: UInt64, denom: UInt64) = {
@@ -68,6 +76,7 @@ final class ProcessMonitor {
         var cpuNs: UInt64
         var mem: Double
         var disk: UInt64?
+        var syscalls: UInt32? = nil
     }
 
     private func scan() {
@@ -76,6 +85,8 @@ final class ProcessMonitor {
         var raw: [pid_t: Raw]
         if useHelper, let h = RootHelper.snapshot() {
             raw = h.mapValues { Raw(name: $0.name, cpuNs: $0.cpuNs, mem: $0.mem, disk: $0.disk) }
+            // The helper doesn't report system calls; ours can be read here (others fail quickly).
+            for pid in raw.keys { raw[pid]?.syscalls = Self.unixSyscalls(pid) }
             snap.usingHelper = true
         } else {
             snap.helperFailed = useHelper
@@ -92,6 +103,11 @@ final class ProcessMonitor {
             var row = ProcRow(pid: pid, name: r.name, cpu: nil, cpuTime: Double(r.cpuNs) / 1e9, mem: r.mem, disk: nil)
             if havePrev, let p = prev[pid] {
                 row.cpu = r.cpuNs >= p.cpuNs ? Double(r.cpuNs - p.cpuNs) / dt * 100 : 0
+                // A 32-bit count that wraps (after ~1.6 h at 370k/s): the wrapping difference is
+                // still right. Less CPU time than before means the pid was reused: no rate then.
+                if let s = r.syscalls, let ps = p.syscalls, r.cpuNs >= p.cpuNs {
+                    row.syscalls = Double(s &- ps) / (dt / 1e9)
+                }
                 if let d = r.disk, let pd = p.disk {
                     row.disk = d >= pd ? Double(d - pd) / (dt / 1e9) : 0
                     visibleDisk += row.disk ?? 0
@@ -104,7 +120,7 @@ final class ProcessMonitor {
         if !snap.usingHelper, havePrev, totalDiskBps.isFinite {
             snap.hiddenDiskBps = max(0, totalDiskBps - visibleDisk)
         }
-        prev = raw.mapValues { ($0.cpuNs, $0.disk) }
+        prev = raw.mapValues { ($0.cpuNs, $0.disk, $0.syscalls) }
         prevTime = now
 
         DispatchQueue.main.async { [weak self] in self?.onUpdate?(snap) }
@@ -138,9 +154,19 @@ final class ProcessMonitor {
             out[pid] = Raw(name: name,
                            cpuNs: machToNs(ru.ri_user_time &+ ru.ri_system_time),
                            mem: Double(ru.ri_phys_footprint),
-                           disk: ru.ri_diskio_bytesread &+ ru.ri_diskio_byteswritten)
+                           disk: ru.ri_diskio_bytesread &+ ru.ri_diskio_byteswritten,
+                           syscalls: Self.unixSyscalls(pid))
         }
         return out
+    }
+
+    /// Unix system calls the process has made so far (a 32-bit count that wraps). macOS only
+    /// gives this for your own processes, unless the caller is root.
+    static func unixSyscalls(_ pid: pid_t) -> UInt32? {
+        var ti = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, size) == size else { return nil }
+        return UInt32(bitPattern: ti.pti_syscalls_unix)
     }
 
     /// Adds every process we could not read ourselves, using /bin/ps.

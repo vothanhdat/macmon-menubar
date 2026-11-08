@@ -21,8 +21,8 @@ _Screenshots use demo history and demo process names._
   RAM and Temp bars blend into red as they near your warning limits, and values past a limit show
   in red. Hover to read values at any moment. **Click a chart** to see it alone at full width with its
   scale; click again to go back. Chart height is adjustable.
-- **Top processes**: CPU, CPU time, RAM and disk. By default you get the top 2 by CPU, RAM and disk;
-  click a column to see the top 6 by that column (click again to go back).
+- **Top processes**: CPU, CPU time, RAM, disk and system calls. By default you get the top 2 by each
+  column (10 rows); click a column to see the top 10 by that column (click again to go back).
 - **Dashboard window**: click the window button next to "Now" in the menu (or **Open in Window**)
   to keep the charts and processes on screen. Resize it and the charts grow and the process list
   shows up to 20 rows. It reopens where you left it, also after login. While it's open the app
@@ -183,6 +183,12 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
   In the process list it's % of **one** core, so a busy process can show more than 100%.
 - **CPU time** in the process list is the total CPU a process has used since it started, as in
   Activity Monitor. Sort by it to find what has been busy all along, not just right now.
+- **Syscalls** in the process list is system calls per second: opening, reading or listing a file
+  is one each. macOS doesn't count disk operations per process, and this is the closest it gets: a
+  process walking or checking many small files makes hundreds of thousands a second, while busy apps
+  at rest make a few thousand. It also catches file work served from memory, which the drive never
+  sees. Other kinds of calls (network, timers) count too, so only large numbers point to file churn.
+  macOS only reports it for your own processes, also in root mode; system processes show "–".
 - **GPU %** is frequency-weighted, as macmon reports it.
 - **Temperatures** are macmon's CPU/GPU averages. **Power** "System" is the whole machine.
 - **Battery** is + when charging and − when discharging.

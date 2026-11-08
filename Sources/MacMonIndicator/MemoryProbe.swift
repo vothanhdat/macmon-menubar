@@ -192,6 +192,11 @@ final class MenuCycler {
                 return v.subviews.lazy.compactMap { find($0, T.self) }.first
             }
             let c = find(w.contentView, ChartsView.self), p = find(w.contentView, ProcessListView.self)
+            if let snap = p?.snapshot {
+                let top = snap.rows.filter { $0.syscalls != nil }.sorted { ($0.syscalls ?? 0) > ($1.syscalls ?? 0) }.prefix(3)
+                Self.line("[procs] \(snap.rows.filter { $0.syscalls != nil }.count) of \(snap.rows.count) with syscalls; top: "
+                          + top.map { "\($0.name) \(Fmt.ops(Float($0.syscalls ?? 0)))/s" }.joined(separator: ", "))
+            }
             Self.line("[window] \(tag): content \(Int(w.contentLayoutRect.width)) x \(Int(w.contentLayoutRect.height)), charts "
                       + "\(Int(c?.frame.width ?? 0)) x \(Int(c?.frame.height ?? 0)) (each \(Int(c?.layout.chartHeight ?? 0)) pt), "
                       + "process rows \(p?.rowCount ?? 0), bottom \(Int(p?.frame.maxY ?? 0))")
@@ -247,6 +252,7 @@ final class MenuCycler {
         MemoryProbe.report("before open")
         if inWindow {
             testWindow = openWindow?()
+            testWindow?.orderFrontRegardless() // above other apps' windows, so it counts as visible, without taking focus
             if hover { hoverTest() }
             // The hover test is followed by resizing, minimizing and restoring (about 8 s).
             DispatchQueue.main.asyncAfter(deadline: .now() + hold + (hover ? 8 : 0)) { [weak self] in

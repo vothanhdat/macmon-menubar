@@ -143,6 +143,8 @@ final class Dashboard {
         s.target = target
         let q = NSMenuItem(title: "Quit MacMon Indicator", action: quit, keyEquivalent: "q")
         q.target = target
+        // macOS 27 adds a gear to "Settings…" on its own; plain text keeps the items alike.
+        if #available(macOS 27, *) { [w, a, s, q].forEach { $0.preferredImageVisibility = .hidden } }
         items += [w, a, s, q]
         return items
     }
