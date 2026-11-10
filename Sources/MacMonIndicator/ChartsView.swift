@@ -36,8 +36,9 @@ struct ChartLayout: Equatable {
 }
 
 /// All charts drawn in one view. Each cell is a label row above a filled bar chart (avg solid,
-/// max faint). Cells flow into 1 or 2 columns. Hovering shows the values at that moment in every
-/// cell; clicking a chart shows it alone at full size, and another click goes back to the grid.
+/// max faint). Cells flow into 1 or 2 columns. Faint gridlines mark local clock times, labeled
+/// under the last chart of each column. Hovering shows the values at that moment in every cell;
+/// clicking a chart shows it alone at full size, and another click goes back to the grid.
 ///
 /// The bars change only when data arrives (once a second while the menu is open), but the pointer
 /// can move 120 times a second. So the cursor and the values live in a separate overlay layer, and
@@ -82,6 +83,8 @@ final class ChartsView: NSView {
 
     private static let inset = Dashboard.inset, colGap: CGFloat = 10
     private static let titleH: CGFloat = 12, chartGap: CGFloat = 1, cellGap: CGFloat = 5
+    /// The time labels under the bottom charts.
+    private static let axisH: CGFloat = 10
     /// A zoomed chart takes the grid's place, and is at least this tall.
     private static let minZoomedHeight: CGFloat = 150
     private static func cellH(_ layout: ChartLayout) -> CGFloat { titleH + chartGap + layout.chartHeight + cellGap }
@@ -89,7 +92,7 @@ final class ChartsView: NSView {
     /// Height needed for `count` charts, or for one zoomed chart in their place.
     static func height(count: Int, layout: ChartLayout, zoomed: Bool = false) -> CGFloat {
         let rows = (count + layout.columns - 1) / max(1, layout.columns)
-        let grid = CGFloat(rows) * cellH(layout) - cellGap + 2
+        let grid = CGFloat(rows) * cellH(layout) - cellGap + axisH + 2
         return zoomed ? max(grid, minZoomedHeight) : grid
     }
 
@@ -97,7 +100,7 @@ final class ChartsView: NSView {
     /// `height(count:layout:)`), for a window that gives the charts its space.
     static func chartHeight(fitting height: CGFloat, count: Int, layout: ChartLayout) -> CGFloat {
         let rows = CGFloat(max(1, (count + layout.columns - 1) / max(1, layout.columns)))
-        return floor((height - 2 + cellGap) / rows - titleH - chartGap - cellGap)
+        return floor((height - axisH - 2 + cellGap) / rows - titleH - chartGap - cellGap)
     }
 
     var rows: [Row] = [] {
@@ -187,6 +190,8 @@ final class ChartsView: NSView {
         let row: Row
         let origin: CGPoint
         let chart: CGRect
+        /// The last chart in its column: the time labels go under it.
+        let axis: Bool
         /// Everything that belongs to this chart, for clicks.
         var frame: CGRect { CGRect(x: origin.x, y: origin.y, width: chart.width, height: chart.maxY - origin.y) }
     }
@@ -197,13 +202,14 @@ final class ChartsView: NSView {
         if let z = zoomed, let row = rows.first(where: { $0.id == z }) {
             let w = bounds.width - Self.inset * 2
             return [Cell(row: row, origin: CGPoint(x: Self.inset, y: 0),
-                         chart: CGRect(x: Self.inset, y: top, width: w, height: bounds.height - top - 2))]
+                         chart: CGRect(x: Self.inset, y: top, width: w, height: bounds.height - top - Self.axisH - 2), axis: true)]
         }
         let cols = max(1, layout.columns)
         let w = (bounds.width - Self.inset * 2 - Self.colGap * CGFloat(cols - 1)) / CGFloat(cols)
         return rows.enumerated().map { i, row in
             let o = CGPoint(x: Self.inset + CGFloat(i % cols) * (w + Self.colGap), y: CGFloat(i / cols) * Self.cellH(layout))
-            return Cell(row: row, origin: o, chart: CGRect(x: o.x, y: o.y + top, width: w, height: layout.chartHeight))
+            return Cell(row: row, origin: o, chart: CGRect(x: o.x, y: o.y + top, width: w, height: layout.chartHeight),
+                        axis: i + cols >= rows.count)
         }
     }
 
@@ -260,6 +266,10 @@ final class ChartsView: NSView {
         let thresholds = Settings.shared.thresholds
         fitScale = Settings.shared.zoomCharts
         let isZoomed = zoomed != nil, offscreen = window == nil
+        let span = HistoryStore.tiers[tier].bucket * Double(cap)
+        let start = history.bucketStart(tier: tier, index: 0, now: now)
+        let ticks = timeTicks(from: start, span: span)
+        let px = 1 / (window?.backingScaleFactor ?? 2)
 
         for c in cells() {
             let row = c.row, rect = c.chart
@@ -274,6 +284,13 @@ final class ChartsView: NSView {
             ctx.clip()
             ctx.setFillColor(row.color.withAlphaComponent(0.08).cgColor)
             ctx.fill(rect)
+
+            // Time gridlines, one device pixel wide, under the bars.
+            ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.1).cgColor)
+            for t in ticks {
+                let x = ((rect.minX + CGFloat((t.time - start) / span) * rect.width) / px).rounded() * px
+                ctx.fill(CGRect(x: x, y: rect.minY, width: px, height: rect.height))
+            }
 
             history.window(tier: tier, series: row.series, now: now, avg: &avgBuf, max: &maxBuf)
             if case .mirrored(let down) = row.shape {
@@ -326,6 +343,8 @@ final class ChartsView: NSView {
             if let bottom, top == nil || rect.height >= 2 * axisLabelH + 6 { drawAxisLabel(ctx, bottom, in: rect, atTop: false) }
             ctx.restoreGState()
 
+            if c.axis { drawTimeLabels(ticks, under: rect, start: start, span: span) }
+
             if offscreen {
                 let v = values(row, now: now, thresholds: thresholds)
                 if let line = labelLine(v, c) { drawLabel(v, line) }
@@ -344,6 +363,83 @@ final class ChartsView: NSView {
         ctx.addPath(CGPath(roundedRect: box, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil))
         ctx.fillPath()
         (text as NSString).draw(at: NSPoint(x: box.minX + 2, y: box.minY), withAttributes: axisAttrs)
+    }
+
+    // MARK: - Time axis
+
+    /// A gridline at a local clock time, with its label.
+    private struct Tick { let time: TimeInterval; let label: String; let width: CGFloat }
+    /// Ticks only change when the window moves on by a bucket.
+    private var tickCache: (tier: Int, start: TimeInterval, ticks: [Tick])?
+
+    private static let weekdayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE")
+        return f
+    }()
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("dMMM")
+        return f
+    }()
+
+    /// Ticks for the window starting at `start`, on local wall-clock boundaries: every 10 seconds
+    /// for 1m, every minute for 5m, 10 minutes for 1h, 4 hours for 24h (the day's name at
+    /// midnight), midnight for 7d, and the 5th, 10th, 15th… of the month for 30d.
+    private func timeTicks(from start: TimeInterval, span: TimeInterval) -> [Tick] {
+        if let c = tickCache, c.tier == tier, c.start == start { return c.ticks }
+        let label = HistoryStore.tiers[tier].label
+        let step: TimeInterval
+        switch label {
+        case "1m": step = 10
+        case "5m": step = 60
+        case "1h": step = 600
+        case "24h": step = 4 * 3600
+        case "7d", "30d": step = 86400
+        default: return []
+        }
+        let tz = TimeZone.current
+        func offset(_ t: TimeInterval) -> TimeInterval { TimeInterval(tz.secondsFromGMT(for: Date(timeIntervalSince1970: t))) }
+        func hhmm(_ s: Int) -> String { String(format: "%02d:%02d", s / 3600, s / 60 % 60) }
+        var ticks: [Tick] = []
+        // `wall` counts seconds as the local clock shows them, so steps land on round local times.
+        var wall = ((start + offset(start)) / step).rounded(.up) * step
+        while true {
+            defer { wall += step }
+            let t = wall - offset(wall - offset(wall)) // the moment the local clock shows `wall`
+            if t >= start + span { break }
+            guard t >= start, t > ticks.last?.time ?? -.infinity else { continue }
+            let date = Date(timeIntervalSince1970: t)
+            let s = Int(wall.truncatingRemainder(dividingBy: 86400)) // seconds into the local day
+            let text: String
+            switch label {
+            case "1m": text = s % 60 == 0 ? hhmm(s) : String(format: ":%02d", s % 60)
+            case "24h": text = s == 0 ? Self.weekdayFormatter.string(from: date) : hhmm(s)
+            case "7d": text = Self.weekdayFormatter.string(from: date)
+            case "30d":
+                // The month only on the first label and on its 5th, so the labels fit 5 days apart.
+                let day = Calendar.current.component(.day, from: date)
+                guard day % 5 == 0 else { continue }
+                text = ticks.isEmpty || day == 5 ? Self.dayFormatter.string(from: date) : String(day)
+            default: text = hhmm(s)
+            }
+            ticks.append(Tick(time: t, label: text, width: ceil((text as NSString).size(withAttributes: axisAttrs).width)))
+        }
+        tickCache = (tier, start, ticks)
+        return ticks
+    }
+
+    /// Labels centered under their gridlines, kept inside the chart's width; one that would touch
+    /// the label before it is left out.
+    private func drawTimeLabels(_ ticks: [Tick], under rect: CGRect, start: TimeInterval, span: TimeInterval) {
+        var lastMaxX = -CGFloat.infinity
+        for t in ticks {
+            let x = rect.minX + CGFloat((t.time - start) / span) * rect.width
+            let minX = min(max(rect.minX, x - t.width / 2), rect.maxX - t.width)
+            guard minX >= lastMaxX + 4 else { continue }
+            (t.label as NSString).draw(at: NSPoint(x: minX, y: rect.maxY + 0.5), withAttributes: axisAttrs)
+            lastMaxX = minX + t.width
+        }
     }
 
     // MARK: - Cursor and values
@@ -545,6 +641,9 @@ final class ChartsView: NSView {
 
     private enum Anchor { case bottom, top, center }
 
+    /// Opacity of the average's gradient fill at the top and the bottom of the chart.
+    private static let avgAlpha: (tip: CGFloat, base: CGFloat) = (0.5, 0.04)
+
     /// How far below the warning limit bars start turning red, as a share of the chart's full
     /// (unzoomed) scale: 25 points for percentages and temperatures, a quarter of total RAM.
     private static let warnBand: Float = 0.25
@@ -628,11 +727,11 @@ final class ChartsView: NSView {
         // Average: gradient fill, clipped to the bars.
         let path = CGMutablePath()
         for (i, v) in avg.enumerated() where visible(v) { path.addRect(barRect(i, v)) }
-        if !path.isEmpty, let g = heat?(0.5, 0.04) {
+        if !path.isEmpty, let g = heat?(Self.avgAlpha.tip, Self.avgAlpha.base) {
             ctx.addPath(path)
             fill(g)
-        } else if !path.isEmpty, let gradient = CGGradient(colorsSpace: nil, colors: [color.withAlphaComponent(0.5).cgColor,
-                                                                                    color.withAlphaComponent(0.04).cgColor] as CFArray,
+        } else if !path.isEmpty, let gradient = CGGradient(colorsSpace: nil, colors: [color.withAlphaComponent(Self.avgAlpha.tip).cgColor,
+                                                                                    color.withAlphaComponent(Self.avgAlpha.base).cgColor] as CFArray,
                                                           locations: [0, 1]) {
             ctx.saveGState()
             ctx.addPath(path)

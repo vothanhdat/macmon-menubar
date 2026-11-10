@@ -383,7 +383,7 @@ enum SnapshotMode {
             charts.history = history
             charts.latest = s
             charts.layout = v.1
-            charts.tier = 0
+            charts.tier = HistoryStore.tiers.firstIndex { $0.label == HistoryStore.defaultTierLabel } ?? 0
             charts.rows = ChartsView.rows(for: ChartID.allCases, hasBattery: true, fanCount: 2)
             let h = ChartsView.height(count: charts.rows.count, layout: v.1)
             let card = NSBox(frame: NSRect(x: x, y: colY[col] + labelH, width: w, height: h + 20))

@@ -15,7 +15,8 @@ _Screenshots use demo history and demo process names._
 - **Two-line menu bar item** with an icon per value (or one line, icons optional). Pick up to 6 metrics,
   and adjust text size, line spacing, item spacing and opacity. Values turn orange or red past your limits.
 - **Menu**: a native macOS menu, so it has the same glass look as your other menu bar menus. It holds
-  filled bar charts for 5m (default) / 1h / 24h / 7d / 30d in one or two columns. You choose which
+  filled bar charts for 1m / 5m (default) / 1h / 24h / 7d / 30d in one or two columns, with local clock
+  times along the bottom (every 10 s, 1 min, 10 min, 4 h, day, 5 days). You choose which
   charts appear and in what order, and where the values go (in the chart, on the label row, or split).
   The solid bar is the average, the faint bar is the peak, so short spikes stay visible. CPU, GPU,
   RAM and Temp bars blend into red as they near your warning limits, and values past a limit show
@@ -138,7 +139,7 @@ How it stays small:
   have been asleep for a minute, the app saves its history, launches a fresh copy of itself and
   quits. Nobody sees the menu bar item go and come back, and memory returns to launch level
   (about 11 MB footprint, 75 MB RSS). Turn it off with **Settings → Free memory while the display sleeps**.
-- **History is one fixed-size memory-mapped file** (~238 KB, never grows). Writing a sample is just a
+- **History is one fixed-size memory-mapped file** (~248 KB, never grows). Writing a sample is just a
   memory write, and the file is flushed once a minute.
 
 ## How it works
@@ -147,8 +148,8 @@ How it stays small:
 macmon pipe -i <ms> ──JSON lines──▶ MacMonIndicator.app
                                      ├─ + disk throughput and operations, battery watts (IOKit, no root)
                                      ├─ status item (two-line grid)
-                                     ├─ history: 5 round-robin tiers in history.bin
-                                     │    5m @5s · 1h @10s · 24h @4min · 7d @30min · 30d @2h  (avg + max)
+                                     ├─ history: 6 round-robin tiers in history.bin
+                                     │    1m @1s · 5m @5s · 1h @10s · 24h @4min · 7d @30min · 30d @2h  (avg + max)
                                      └─ menu (NSMenu; built on open, freed on close)
                                           └─ process monitor: libproc (your processes) + /bin/ps (others)
                                                               or the root helper (everything)

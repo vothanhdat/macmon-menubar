@@ -165,7 +165,7 @@ final class Dashboard {
         let format = short ? "HH:mm:ss" : (HistoryStore.tiers[tier].bucket < 1800 ? "HH:mm" : "EEE d MMM HH:mm")
         if timeFormatter.dateFormat != format { timeFormatter.dateFormat = format } // setting it re-parses the format
         let start = timeFormatter.string(from: Date(timeIntervalSince1970: t))
-        if HistoryStore.tiers[tier].bucket < 1800 {
+        if HistoryStore.tiers[tier].bucket > 1 && HistoryStore.tiers[tier].bucket < 1800 {
             let end = timeFormatter.string(from: Date(timeIntervalSince1970: t + HistoryStore.tiers[tier].bucket))
             tierBar.timeText = start == end ? start : "\(start)–\(end)"
         } else {

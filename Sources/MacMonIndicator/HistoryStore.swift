@@ -7,7 +7,7 @@ struct Tier {
     let capacity: Int
 }
 
-/// Fixed-size history kept in one memory-mapped file (~238 KB, never grows).
+/// Fixed-size history kept in one memory-mapped file (~248 KB, never grows).
 /// Each bucket stores avg + max per series. Updating history is just writing memory;
 /// the kernel writes dirty pages back to disk, and we nudge it once a minute.
 /// Partially filled buckets live in the file too, so a restart continues where it left off.
@@ -15,9 +15,10 @@ struct Tier {
 final class HistoryStore {
     /// Display order is array order. The file records each tier's shape and the series count, so
     /// tiers can be added or reordered and series appended later: matching tiers are copied over
-    /// when the layout changes (see `migrate`).
+    /// when the layout changes (see `migrate`). The 64-byte header has room for 6 tiers.
     static let tiers = [
-        Tier(label: "5m", bucket: 5, capacity: 60),        // 5 s buckets
+        Tier(label: "1m", bucket: 1, capacity: 60),        // 1 s buckets
+        Tier(label: "5m", bucket: 5, capacity: 60),        // 5 s
         Tier(label: "1h", bucket: 10, capacity: 360),      // 10 s
         Tier(label: "24h", bucket: 240, capacity: 360),    // 4 min
         Tier(label: "7d", bucket: 1800, capacity: 336),    // 30 min
@@ -237,21 +238,49 @@ final class HistoryStore {
                 avg[i] = .nan; mx[i] = .nan
             }
         }
-        // A bucket can miss its sample by timing jitter (e.g. 5 s samples into 5 s buckets).
-        // Fill such one-bucket holes from the left neighbour; longer gaps (sleep) stay visible.
-        for i in 1..<cap where !avg[i].isFinite && avg[i - 1].isFinite && (i == cap - 1 || avg[i + 1].isFinite) {
-            avg[i] = avg[i - 1]; mx[i] = mx[i - 1]
+        // Holes shorter than `maxHole` buckets are filled from the left neighbour (see there);
+        // longer gaps (sleep) stay visible.
+        let maxHole = Self.maxHole(t)
+        var i = 1
+        while i < cap {
+            guard !avg[i].isFinite, avg[i - 1].isFinite else { i += 1; continue }
+            var j = i
+            while j < cap && !avg[j].isFinite { j += 1 }
+            if j - i <= maxHole { for k in i..<j { avg[k] = avg[i - 1]; mx[k] = mx[i - 1] } }
+            i = j
         }
     }
 
-    /// Average of one series in bucket `i` of the window (for hover read-outs).
+    /// The longest run of empty buckets that counts as a hole, not a gap. Samples come every 1 to
+    /// 10 s (the slowest battery setting, and while the displays sleep), so 1 s buckets miss
+    /// several between samples while the menu is closed, and longer buckets can miss one by timing
+    /// jitter. Holes up to 11 s are filled (at least one bucket); sleep leaves far longer gaps.
+    private static func maxHole(_ t: Int) -> Int { max(1, Int(11 / tiers[t].bucket)) }
+
+    /// Average of one series in bucket `b`, NaN when it holds no data.
+    private func avgValue(_ t: Int, _ s: Int, _ b: Int64) -> Float {
+        if b == accIndex(t) { return accValues(t, s).avg }
+        let lastIdx = last(t)
+        guard b <= lastIdx && b > lastIdx - Int64(Self.tiers[t].capacity) else { return .nan }
+        return slotPtr(t, b)[s * 2]
+    }
+
+    /// Average of one series in bucket `i` of the window (for hover read-outs), with holes filled
+    /// as in `window(tier:...)`.
     func value(tier t: Int, series s: Series, index i: Int, now: TimeInterval) -> Float {
         let tier = Self.tiers[t]
-        let b = Int64((now / tier.bucket).rounded(.down)) - Int64(tier.capacity) + 1 + Int64(i)
-        if b == accIndex(t) { return accValues(t, s.rawValue).avg }
-        let lastIdx = last(t)
-        guard b <= lastIdx && b > lastIdx - Int64(tier.capacity) else { return .nan }
-        return slotPtr(t, b)[s.rawValue * 2]
+        let start = Int64((now / tier.bucket).rounded(.down)) - Int64(tier.capacity) + 1
+        let end = start + Int64(tier.capacity), b = start + Int64(i)
+        let v = avgValue(t, s.rawValue, b)
+        guard !v.isFinite, b > start else { return v }
+        let maxHole = Int64(Self.maxHole(t))
+        var l = b - 1
+        while l > start, b - l <= maxHole, !avgValue(t, s.rawValue, l).isFinite { l -= 1 }
+        let left = avgValue(t, s.rawValue, l)
+        guard left.isFinite else { return .nan }
+        var r = b + 1
+        while r < end, r - l - 1 <= maxHole, !avgValue(t, s.rawValue, r).isFinite { r += 1 }
+        return r - l - 1 <= maxHole ? left : .nan
     }
 
     /// Start time of bucket `i` in the window used by `window(tier:...)`.
