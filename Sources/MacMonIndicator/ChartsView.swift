@@ -36,13 +36,15 @@ struct ChartLayout: Equatable {
 }
 
 /// All charts drawn in one view. Each cell is a label row above a filled bar chart (avg solid,
-/// max faint). Cells flow into 1 or 2 columns. Faint gridlines mark local clock times, labeled
-/// under the last chart of each column. Hovering shows the values at that moment in every cell;
+/// max faint). Cells flow into 1 or 2 columns. Faint gridlines mark local clock times; the chart
+/// under the pointer labels them, with the time under the cursor highlighted on the same line.
+/// Hovering shows the values at that moment in every cell;
 /// clicking a chart shows it alone at full size, and another click goes back to the grid.
 ///
 /// The bars change only when data arrives (once a second while the menu is open), but the pointer
 /// can move 120 times a second. So the cursor and the values live in a separate overlay layer, and
-/// moving the pointer redraws only the small parts of it that change, never the bars.
+/// moving the pointer redraws only the small parts of it that change, never the bars. The time
+/// labels live there too, so they can show on the hovered chart only.
 final class ChartsView: NSView {
     /// `smart` zooms to the range the data actually covers (at least `minSpan` wide), for slow
     /// metrics like temperature and RAM. It only applies when "Zoom Temp and RAM" is on in
@@ -83,8 +85,6 @@ final class ChartsView: NSView {
 
     private static let inset = Dashboard.inset, colGap: CGFloat = 10
     private static let titleH: CGFloat = 12, chartGap: CGFloat = 1, cellGap: CGFloat = 5
-    /// The time labels under the bottom charts.
-    private static let axisH: CGFloat = 10
     /// A zoomed chart takes the grid's place, and is at least this tall.
     private static let minZoomedHeight: CGFloat = 150
     private static func cellH(_ layout: ChartLayout) -> CGFloat { titleH + chartGap + layout.chartHeight + cellGap }
@@ -92,7 +92,7 @@ final class ChartsView: NSView {
     /// Height needed for `count` charts, or for one zoomed chart in their place.
     static func height(count: Int, layout: ChartLayout, zoomed: Bool = false) -> CGFloat {
         let rows = (count + layout.columns - 1) / max(1, layout.columns)
-        let grid = CGFloat(rows) * cellH(layout) - cellGap + axisH + 2
+        let grid = CGFloat(rows) * cellH(layout) - cellGap + 2
         return zoomed ? max(grid, minZoomedHeight) : grid
     }
 
@@ -100,7 +100,7 @@ final class ChartsView: NSView {
     /// `height(count:layout:)`), for a window that gives the charts its space.
     static func chartHeight(fitting height: CGFloat, count: Int, layout: ChartLayout) -> CGFloat {
         let rows = CGFloat(max(1, (count + layout.columns - 1) / max(1, layout.columns)))
-        return floor((height - axisH - 2 + cellGap) / rows - titleH - chartGap - cellGap)
+        return floor((height - 2 + cellGap) / rows - titleH - chartGap - cellGap)
     }
 
     var rows: [Row] = [] {
@@ -122,6 +122,7 @@ final class ChartsView: NSView {
         didSet {
             guard zoomed != oldValue else { return }
             hoverIndex = nil
+            hoverChart = nil
             contentChanged()
             onZoom?()
         }
@@ -135,6 +136,15 @@ final class ChartsView: NSView {
             scheduleHoverValues()
         }
     }
+    /// The chart under the pointer: it shows the time labels.
+    private var hoverChart: ChartID? {
+        didSet { if hoverChart != oldValue { updateTimeLabels() } }
+    }
+    /// Each chart's bottom scale label from the last draw; the time labels leave room for it.
+    private var bottomLabels: [ChartID: String] = [:]
+    /// The time labels showing now, so a pointer move that keeps them doesn't redraw them.
+    private var shownTimeLabels: (chart: CGRect, labels: [TimeLabel])?
+    private var shownCursorTime: TimeLabel?
     /// The cursor follows every pointer move; the values (and the time) at most 30 times a second,
     /// since text changing faster can't be read anyway. The last move always shows.
     private var lastHoverValues: CFTimeInterval = 0
@@ -146,6 +156,10 @@ final class ChartsView: NSView {
     private let axisAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .regular),
                                                             .foregroundColor: NSColor.secondaryLabelColor]
     private lazy var axisLabelH = ceil(("0" as NSString).size(withAttributes: axisAttrs).height) - 1
+    private let timeAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 7, weight: .regular),
+                                                            .foregroundColor: NSColor.secondaryLabelColor]
+    private lazy var timeLabelH = ceil(("0" as NSString).size(withAttributes: timeAttrs).height) - 1
+    private lazy var cursorTimeAttrs = timeAttrs.merging([.foregroundColor: NSColor.windowBackgroundColor]) { $1 }
     private let mainAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
                                                             .foregroundColor: NSColor.labelColor]
     private let detailAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
@@ -190,8 +204,6 @@ final class ChartsView: NSView {
         let row: Row
         let origin: CGPoint
         let chart: CGRect
-        /// The last chart in its column: the time labels go under it.
-        let axis: Bool
         /// Everything that belongs to this chart, for clicks.
         var frame: CGRect { CGRect(x: origin.x, y: origin.y, width: chart.width, height: chart.maxY - origin.y) }
     }
@@ -202,14 +214,13 @@ final class ChartsView: NSView {
         if let z = zoomed, let row = rows.first(where: { $0.id == z }) {
             let w = bounds.width - Self.inset * 2
             return [Cell(row: row, origin: CGPoint(x: Self.inset, y: 0),
-                         chart: CGRect(x: Self.inset, y: top, width: w, height: bounds.height - top - Self.axisH - 2), axis: true)]
+                         chart: CGRect(x: Self.inset, y: top, width: w, height: bounds.height - top - 2))]
         }
         let cols = max(1, layout.columns)
         let w = (bounds.width - Self.inset * 2 - Self.colGap * CGFloat(cols - 1)) / CGFloat(cols)
         return rows.enumerated().map { i, row in
             let o = CGPoint(x: Self.inset + CGFloat(i % cols) * (w + Self.colGap), y: CGFloat(i / cols) * Self.cellH(layout))
-            return Cell(row: row, origin: o, chart: CGRect(x: o.x, y: o.y + top, width: w, height: layout.chartHeight),
-                        axis: i + cols >= rows.count)
+            return Cell(row: row, origin: o, chart: CGRect(x: o.x, y: o.y + top, width: w, height: layout.chartHeight))
         }
     }
 
@@ -234,9 +245,13 @@ final class ChartsView: NSView {
         // All charts share one time axis, so only the x position within a column matters.
         hoverIndex = cells().first { p.x >= $0.chart.minX && p.x < $0.chart.maxX }
             .map { min(cap - 1, max(0, Int((p.x - $0.chart.minX) / $0.chart.width * CGFloat(cap)))) }
+        hoverChart = cells().first { $0.frame.contains(p) }?.row.id
     }
 
-    override func mouseExited(with event: NSEvent) { hoverIndex = nil }
+    override func mouseExited(with event: NSEvent) {
+        hoverIndex = nil
+        hoverChart = nil
+    }
 
     // Menus deliver mouseUp to custom item views and stay open.
     override func mouseUp(with event: NSEvent) {
@@ -288,8 +303,7 @@ final class ChartsView: NSView {
             // Time gridlines, one device pixel wide, under the bars.
             ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.1).cgColor)
             for t in ticks {
-                let x = ((rect.minX + CGFloat((t.time - start) / span) * rect.width) / px).rounded() * px
-                ctx.fill(CGRect(x: x, y: rect.minY, width: px, height: rect.height))
+                ctx.fill(CGRect(x: tickX(t, in: rect, start: start, span: span, px: px), y: rect.minY, width: px, height: rect.height))
             }
 
             history.window(tier: tier, series: row.series, now: now, avg: &avgBuf, max: &maxBuf)
@@ -340,29 +354,42 @@ final class ChartsView: NSView {
             }
             if let top { drawAxisLabel(ctx, top, in: rect, atTop: true) }
             // A very short chart has room for one label only.
-            if let bottom, top == nil || rect.height >= 2 * axisLabelH + 6 { drawAxisLabel(ctx, bottom, in: rect, atTop: false) }
+            var bottomText: String?
+            if let bottom, top == nil || rect.height >= 2 * axisLabelH + 6 {
+                drawAxisLabel(ctx, bottom, in: rect, atTop: false)
+                bottomText = bottom
+            }
+            bottomLabels[row.id] = bottomText
+            let hoverLabels = offscreen && hoverChart == row.id ? hoverTimeLabels(c, now: now) : nil
+            if let hoverLabels { drawTimeLabels(ctx, hoverLabels.axis) }
             ctx.restoreGState()
-
-            if c.axis { drawTimeLabels(ticks, under: rect, start: start, span: span) }
 
             if offscreen {
                 let v = values(row, now: now, thresholds: thresholds)
                 if let line = labelLine(v, c) { drawLabel(v, line) }
                 if let chip = v.chip { drawChip(chip, at: chipRect(chip, in: rect), hot: v.hot) }
+                if let cursor = hoverLabels?.cursor { drawCursorTime(cursor) }
             }
         }
     }
 
-    /// An axis label in the chart's top- or bottom-left corner, on a translucent backing like the
-    /// value chip so it stays readable over the bars.
+    /// An axis label in the chart's top- or bottom-left corner.
     private func drawAxisLabel(_ ctx: CGContext, _ text: String, in rect: CGRect, atTop: Bool) {
+        drawTag(ctx, text, in: axisLabelBox(text, in: rect, atTop: atTop))
+    }
+
+    private func axisLabelBox(_ text: String, in rect: CGRect, atTop: Bool) -> CGRect {
         let w = (text as NSString).size(withAttributes: axisAttrs).width
-        let box = CGRect(x: rect.minX + 2, y: atTop ? rect.minY + 1.5 : rect.maxY - axisLabelH - 1.5,
-                         width: w + 4, height: axisLabelH)
+        return CGRect(x: rect.minX + 2, y: atTop ? rect.minY + 1.5 : rect.maxY - axisLabelH - 1.5, width: w + 4, height: axisLabelH)
+    }
+
+    /// Small axis text on a translucent backing like the value chip, so it stays readable over the bars.
+    private func drawTag(_ ctx: CGContext, _ text: String, in box: CGRect,
+                         attrs: [NSAttributedString.Key: Any]? = nil, padding: CGFloat = 2) {
         ctx.setFillColor(NSColor.windowBackgroundColor.withAlphaComponent(0.6).cgColor)
         ctx.addPath(CGPath(roundedRect: box, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil))
         ctx.fillPath()
-        (text as NSString).draw(at: NSPoint(x: box.minX + 2, y: box.minY), withAttributes: axisAttrs)
+        (text as NSString).draw(at: NSPoint(x: box.minX + padding, y: box.minY), withAttributes: attrs ?? axisAttrs)
     }
 
     // MARK: - Time axis
@@ -372,20 +399,9 @@ final class ChartsView: NSView {
     /// Ticks only change when the window moves on by a bucket.
     private var tickCache: (tier: Int, start: TimeInterval, ticks: [Tick])?
 
-    private static let weekdayFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("EEE")
-        return f
-    }()
-    private static let dayFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("dMMM")
-        return f
-    }()
-
     /// Ticks for the window starting at `start`, on local wall-clock boundaries: every 10 seconds
-    /// for 1m, every minute for 5m, 10 minutes for 1h, 4 hours for 24h (the day's name at
-    /// midnight), midnight for 7d, and the 5th, 10th, 15th… of the month for 30d.
+    /// for 1m, every minute for 5m, 10 minutes for 1h, 4 hours for 24h ("0h", "4h"…), and for 7d
+    /// every midnight, for 30d the 5th, 10th, 15th… of the month, labeled with the day ("10").
     private func timeTicks(from start: TimeInterval, span: TimeInterval) -> [Tick] {
         if let c = tickCache, c.tier == tier, c.start == start { return c.ticks }
         let label = HistoryStore.tiers[tier].label
@@ -409,36 +425,117 @@ final class ChartsView: NSView {
             let t = wall - offset(wall - offset(wall)) // the moment the local clock shows `wall`
             if t >= start + span { break }
             guard t >= start, t > ticks.last?.time ?? -.infinity else { continue }
-            let date = Date(timeIntervalSince1970: t)
             let s = Int(wall.truncatingRemainder(dividingBy: 86400)) // seconds into the local day
             let text: String
             switch label {
             case "1m": text = s % 60 == 0 ? hhmm(s) : String(format: ":%02d", s % 60)
-            case "24h": text = s == 0 ? Self.weekdayFormatter.string(from: date) : hhmm(s)
-            case "7d": text = Self.weekdayFormatter.string(from: date)
-            case "30d":
-                // The month only on the first label and on its 5th, so the labels fit 5 days apart.
-                let day = Calendar.current.component(.day, from: date)
-                guard day % 5 == 0 else { continue }
-                text = ticks.isEmpty || day == 5 ? Self.dayFormatter.string(from: date) : String(day)
+            case "24h": text = "\(s / 3600)h"
+            case "7d", "30d":
+                let day = Calendar.current.component(.day, from: Date(timeIntervalSince1970: t))
+                guard label == "7d" || day % 5 == 0 else { continue }
+                text = String(day)
             default: text = hhmm(s)
             }
-            ticks.append(Tick(time: t, label: text, width: ceil((text as NSString).size(withAttributes: axisAttrs).width)))
+            ticks.append(Tick(time: t, label: text, width: ceil((text as NSString).size(withAttributes: timeAttrs).width)))
         }
         tickCache = (tier, start, ticks)
         return ticks
     }
 
-    /// Labels centered under their gridlines, kept inside the chart's width; one that would touch
-    /// the label before it is left out.
-    private func drawTimeLabels(_ ticks: [Tick], under rect: CGRect, start: TimeInterval, span: TimeInterval) {
-        var lastMaxX = -CGFloat.infinity
-        for t in ticks {
-            let x = rect.minX + CGFloat((t.time - start) / span) * rect.width
-            let minX = min(max(rect.minX, x - t.width / 2), rect.maxX - t.width)
-            guard minX >= lastMaxX + 4 else { continue }
-            (t.label as NSString).draw(at: NSPoint(x: minX, y: rect.maxY + 0.5), withAttributes: axisAttrs)
-            lastMaxX = minX + t.width
+    /// x of a tick's gridline, on a device pixel.
+    private func tickX(_ t: Tick, in rect: CGRect, start: TimeInterval, span: TimeInterval, px: CGFloat) -> CGFloat {
+        ((rect.minX + CGFloat((t.time - start) / span) * rect.width) / px).rounded() * px
+    }
+
+    private struct TimeLabel: Equatable { let text: String; let box: CGRect }
+
+    /// A chart's time labels: along its bottom edge, each centered on its gridline, a size smaller
+    /// than the scale labels. The value chip shows over them. One that would run onto the bottom
+    /// scale label, past the chart or onto the label before it is left out.
+    private func timeLabels(in rect: CGRect, bottomLabel: String?, now: TimeInterval) -> [TimeLabel] {
+        guard let history else { return [] }
+        let span = HistoryStore.tiers[tier].bucket * Double(HistoryStore.tiers[tier].capacity)
+        let start = history.bucketStart(tier: tier, index: 0, now: now)
+        let px = 1 / (window?.backingScaleFactor ?? 2)
+        var lastMaxX = max(rect.minX - 1, bottomLabel.map { axisLabelBox($0, in: rect, atTop: false).maxX } ?? -.infinity)
+        var labels: [TimeLabel] = []
+        for t in timeTicks(from: start, span: span) {
+            let w = t.width + 3
+            let box = CGRect(x: tickX(t, in: rect, start: start, span: span, px: px) + px / 2 - w / 2, y: rect.maxY - timeLabelH - 1.5,
+                             width: w, height: timeLabelH)
+            guard box.minX >= lastMaxX + 2, box.maxX <= rect.maxX - 1 else { continue }
+            labels.append(TimeLabel(text: t.label, box: box))
+            lastMaxX = box.maxX
+        }
+        return labels
+    }
+
+    /// On the same backing as the scale labels.
+    private func drawTimeLabels(_ ctx: CGContext, _ labels: [TimeLabel]) {
+        for l in labels { drawTag(ctx, l.text, in: l.box, attrs: timeAttrs, padding: 1.5) }
+    }
+
+    private static func timeFormatter(_ format: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.dateFormat = format
+        return f
+    }
+    private static let cursorTimeFormatters = (seconds: timeFormatter("HH:mm:ss"), minutes: timeFormatter("HH:mm"),
+                                               days: timeFormatter("d HH:mm"))
+
+    /// The time under the cursor (its bucket's start), centered on the cursor on the time labels'
+    /// line and kept inside the chart: seconds for buckets under a minute, the day of the month
+    /// from 30-minute buckets (7d, 30d) on.
+    private func cursorTimeLabel(_ c: Cell, _ h: Int, now: TimeInterval) -> TimeLabel? {
+        guard let history else { return nil }
+        let bucket = HistoryStore.tiers[tier].bucket
+        let f = bucket < 60 ? Self.cursorTimeFormatters.seconds : bucket < 1800 ? Self.cursorTimeFormatters.minutes
+            : Self.cursorTimeFormatters.days
+        let text = f.string(from: Date(timeIntervalSince1970: history.bucketStart(tier: tier, index: h, now: now)))
+        let w = ceil((text as NSString).size(withAttributes: timeAttrs).width) + 3
+        let x = min(max(c.chart.minX + 1, cursorRect(c, h).midX - w / 2), c.chart.maxX - 1 - w)
+        return TimeLabel(text: text, box: CGRect(x: x, y: c.chart.maxY - timeLabelH - 1.5, width: w, height: timeLabelH))
+    }
+
+    /// A hovered chart's time labels, and the cursor's time label that shows over them.
+    private func hoverTimeLabels(_ c: Cell, now: TimeInterval) -> (axis: [TimeLabel], cursor: TimeLabel?) {
+        (timeLabels(in: c.chart, bottomLabel: bottomLabels[c.row.id], now: now), hoverIndex.flatMap { cursorTimeLabel(c, $0, now: now) })
+    }
+
+    /// Inverted, like the cursor: the label color as an opaque backing, so it stands out from and
+    /// covers the time labels and the value under it.
+    private func drawCursorTime(_ l: TimeLabel) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.setFillColor(NSColor.labelColor.withAlphaComponent(1).cgColor)
+        ctx.addPath(CGPath(roundedRect: l.box, cornerWidth: 2.5, cornerHeight: 2.5, transform: nil))
+        ctx.fillPath()
+        (l.text as NSString).draw(at: NSPoint(x: l.box.minX + 1.5, y: l.box.minY), withAttributes: cursorTimeAttrs)
+    }
+
+    /// Shows the time labels of the chart under the pointer in the overlay, or hides them. Each
+    /// layer is redrawn only when what it shows changes.
+    private func updateTimeLabels() {
+        guard window != nil else { return }
+        let cell = hoverChart.flatMap { id in cells().first { $0.row.id == id } }
+        let labels = cell.map { hoverTimeLabels($0, now: Date().timeIntervalSince1970) }
+        let axis = cell.flatMap { c in labels.map { (chart: c.chart, labels: $0.axis) } }
+        if axis?.chart != shownTimeLabels?.chart || axis?.labels != shownTimeLabels?.labels {
+            shownTimeLabels = axis
+            if let axis, let first = axis.labels.first, let last = axis.labels.last {
+                overlay.time.show(first.box.union(last.box)) { [weak self] in
+                    guard let self, let ctx = NSGraphicsContext.current?.cgContext else { return }
+                    ctx.addPath(CGPath(roundedRect: axis.chart, cornerWidth: 4, cornerHeight: 4, transform: nil))
+                    ctx.clip()
+                    self.drawTimeLabels(ctx, axis.labels)
+                }
+            } else {
+                overlay.time.show(nil) {}
+            }
+        }
+        let cursor = labels?.cursor
+        if cursor != shownCursorTime {
+            shownCursorTime = cursor
+            overlay.cursorTime.show(cursor?.box) { [weak self] in if let cursor { self?.drawCursorTime(cursor) } }
         }
     }
 
@@ -519,6 +616,7 @@ final class ChartsView: NSView {
             let chip = v.chip.map { (text: $0, rect: chipRect($0, in: c.chart)) }
             l.chip.show(chip?.rect) { [weak self] in if let chip { self?.drawChip(chip.text, at: chip.rect, hot: v.hot) } }
         }
+        updateTimeLabels()
     }
 
     /// The label-row values, laid out right-aligned on the label row.
@@ -565,6 +663,18 @@ final class ChartsView: NSView {
             init(label: TextLayer, chip: TextLayer) { self.label = label; self.chip = chip }
         }
         private(set) var cells: [CellLayers] = []
+        /// The hovered chart's time labels, under the value chips.
+        private(set) lazy var time: TextLayer = {
+            let t = addTextLayer()
+            t.zPosition = -1
+            return t
+        }()
+        /// The time under the cursor, over everything.
+        private(set) lazy var cursorTime: TextLayer = {
+            let t = addTextLayer()
+            t.zPosition = 1
+            return t
+        }()
 
         /// One set of layers per chart on screen.
         func prepare(count: Int) {

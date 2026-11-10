@@ -15,8 +15,8 @@ _Screenshots use demo history and demo process names._
 - **Two-line menu bar item** with an icon per value (or one line, icons optional). Pick up to 6 metrics,
   and adjust text size, line spacing, item spacing and opacity. Values turn orange or red past your limits.
 - **Menu**: a native macOS menu, so it has the same glass look as your other menu bar menus. It holds
-  filled bar charts for 1m / 5m (default) / 1h / 24h / 7d / 30d in one or two columns, with local clock
-  times along the bottom (every 10 s, 1 min, 10 min, 4 h, day, 5 days). You choose which
+  filled bar charts for 1m / 5m (default) / 1h / 24h / 7d / 30d in one or two columns, with gridlines at
+  local clock times (every 10 s, 1 min, 10 min, 4 h, day, 5 days), labeled on the chart under the pointer. You choose which
   charts appear and in what order, and where the values go (in the chart, on the label row, or split).
   The solid bar is the average, the faint bar is the peak, so short spikes stay visible. CPU, GPU,
   RAM and Temp bars blend into red as they near your warning limits, and values past a limit show
