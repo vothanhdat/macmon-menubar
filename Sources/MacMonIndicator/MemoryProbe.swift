@@ -193,9 +193,9 @@ final class MenuCycler {
             }
             let c = find(w.contentView, ChartsView.self), p = find(w.contentView, ProcessListView.self)
             if let snap = p?.snapshot {
-                let top = snap.rows.filter { $0.syscalls != nil }.sorted { ($0.syscalls ?? 0) > ($1.syscalls ?? 0) }.prefix(3)
-                Self.line("[procs] \(snap.rows.filter { $0.syscalls != nil }.count) of \(snap.rows.count) with syscalls; top: "
-                          + top.map { "\($0.name) \(Fmt.ops(Float($0.syscalls ?? 0)))/s" }.joined(separator: ", "))
+                let top = snap.rows.filter { $0.kernel != nil }.sorted { ($0.kernel ?? 0) > ($1.kernel ?? 0) }.prefix(3)
+                Self.line("[procs] \(snap.rows.filter { $0.kernel != nil }.count) of \(snap.rows.count) with kernel time; top: "
+                          + top.map { String(format: "%@ %.1f%%", $0.name, $0.kernel ?? 0) }.joined(separator: ", "))
             }
             Self.line("[window] \(tag): content \(Int(w.contentLayoutRect.width)) x \(Int(w.contentLayoutRect.height)), charts "
                       + "\(Int(c?.frame.width ?? 0)) x \(Int(c?.frame.height ?? 0)) (each \(Int(c?.layout.chartHeight ?? 0)) pt), "

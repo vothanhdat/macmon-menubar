@@ -8,8 +8,8 @@ struct ProcRow {
     var cpuTime: Double // seconds of CPU used since the process started
     var mem: Double    // bytes
     var disk: Double?  // bytes/s, nil when not readable without root
-    /// Unix system calls per second (opening, reading, listing files and more): your processes only.
-    var syscalls: Double? = nil
+    /// % of one core spent in the kernel on its behalf (system calls, page faults); part of `cpu`.
+    var kernel: Double? = nil
 }
 
 struct ProcSnapshot {
@@ -18,24 +18,26 @@ struct ProcSnapshot {
     var hiddenDiskBps: Double?
     var usingHelper = false
     var helperFailed = false
+    /// The installed root helper is an older version that doesn't report kernel time.
+    var helperOutdated = false
 }
 
-/// Samples per-process CPU, memory, disk I/O and system calls. Runs only while the menu is open
-/// or the dashboard window can be seen.
-/// - Your processes: libproc (exact CPU time, memory footprint, disk bytes, system calls).
-/// - Other users' / system processes: /bin/ps (CPU time + RSS; it has root rights), disk unknown.
-/// - Root mode: the helper daemon returns everything for every process, except system calls,
-///   which stay limited to your processes.
+/// Samples per-process CPU (and the kernel's part of it), memory and disk I/O. Runs only while
+/// the menu is open or the dashboard window can be seen.
+/// - Your processes: libproc (exact CPU and kernel time, memory footprint, disk bytes).
+/// - Other users' / system processes: /bin/ps (CPU and kernel time + RSS; it has root rights),
+///   disk unknown.
+/// - Root mode: the helper daemon returns everything for every process.
 ///
-/// macOS counts disk bytes per process but not disk operations. System calls are the closest:
-/// a process walking or reading many small files makes hundreds of thousands a second, while
-/// busy apps at rest make a few thousand. They also catch file work served from memory.
+/// macOS counts disk bytes per process but not disk operations. Kernel time is the closest sign
+/// of heavy file work: a process walking or checking many small files spends most of its CPU in
+/// the kernel, even when the files come from memory and the drive never sees them.
 final class ProcessMonitor {
     var onUpdate: ((ProcSnapshot) -> Void)?
 
     private let queue = DispatchQueue(label: "MacMonIndicator.procmon", qos: .utility)
     private var timer: DispatchSourceTimer?
-    private var prev: [pid_t: (cpuNs: UInt64, disk: UInt64?, syscalls: UInt32?)] = [:]
+    private var prev: [pid_t: (cpuNs: UInt64, disk: UInt64?, kernelNs: UInt64?)] = [:]
     private var prevTime: UInt64 = 0
     private let me = getuid()
     private let timebase: (numer: UInt64, denom: UInt64) = {
@@ -76,7 +78,7 @@ final class ProcessMonitor {
         var cpuNs: UInt64
         var mem: Double
         var disk: UInt64?
-        var syscalls: UInt32? = nil
+        var kernelNs: UInt64?
     }
 
     private func scan() {
@@ -84,10 +86,9 @@ final class ProcessMonitor {
         var snap = ProcSnapshot()
         var raw: [pid_t: Raw]
         if useHelper, let h = RootHelper.snapshot() {
-            raw = h.mapValues { Raw(name: $0.name, cpuNs: $0.cpuNs, mem: $0.mem, disk: $0.disk) }
-            // The helper doesn't report system calls; ours can be read here (others fail quickly).
-            for pid in raw.keys { raw[pid]?.syscalls = Self.unixSyscalls(pid) }
+            raw = h.processes.mapValues { Raw(name: $0.name, cpuNs: $0.cpuNs, mem: $0.mem, disk: $0.disk, kernelNs: $0.kernelNs) }
             snap.usingHelper = true
+            snap.helperOutdated = h.version < 2
         } else {
             snap.helperFailed = useHelper
             raw = collectOwn()
@@ -103,10 +104,9 @@ final class ProcessMonitor {
             var row = ProcRow(pid: pid, name: r.name, cpu: nil, cpuTime: Double(r.cpuNs) / 1e9, mem: r.mem, disk: nil)
             if havePrev, let p = prev[pid] {
                 row.cpu = r.cpuNs >= p.cpuNs ? Double(r.cpuNs - p.cpuNs) / dt * 100 : 0
-                // A 32-bit count that wraps (after ~1.6 h at 370k/s): the wrapping difference is
-                // still right. Less CPU time than before means the pid was reused: no rate then.
-                if let s = r.syscalls, let ps = p.syscalls, r.cpuNs >= p.cpuNs {
-                    row.syscalls = Double(s &- ps) / (dt / 1e9)
+                // Less time than before means the pid was reused: no rate then.
+                if let k = r.kernelNs, let pk = p.kernelNs, k >= pk, r.cpuNs >= p.cpuNs {
+                    row.kernel = Double(k - pk) / dt * 100
                 }
                 if let d = r.disk, let pd = p.disk {
                     row.disk = d >= pd ? Double(d - pd) / (dt / 1e9) : 0
@@ -120,7 +120,7 @@ final class ProcessMonitor {
         if !snap.usingHelper, havePrev, totalDiskBps.isFinite {
             snap.hiddenDiskBps = max(0, totalDiskBps - visibleDisk)
         }
-        prev = raw.mapValues { ($0.cpuNs, $0.disk, $0.syscalls) }
+        prev = raw.mapValues { ($0.cpuNs, $0.disk, $0.kernelNs) }
         prevTime = now
 
         DispatchQueue.main.async { [weak self] in self?.onUpdate?(snap) }
@@ -175,35 +175,22 @@ final class ProcessMonitor {
                 entry.start = ru.ri_proc_start_abstime
                 known[pid] = entry
             }
-            let cpuNs = machToNs(ru.ri_user_time &+ ru.ri_system_time)
-            // No CPU time since the last scan means no system calls either: keep the last count.
-            var syscalls: UInt32?
-            if let p = prev[pid], p.cpuNs == cpuNs, let s = p.syscalls { syscalls = s } else { syscalls = Self.unixSyscalls(pid) }
             out[pid] = Raw(name: entry.name,
-                           cpuNs: cpuNs,
+                           cpuNs: machToNs(ru.ri_user_time &+ ru.ri_system_time),
                            mem: Double(ru.ri_phys_footprint),
                            disk: ru.ri_diskio_bytesread &+ ru.ri_diskio_byteswritten,
-                           syscalls: syscalls)
+                           kernelNs: machToNs(ru.ri_system_time))
         }
         let alive = Set(listed)
         known = known.filter { alive.contains($0.key) }
         return out
     }
 
-    /// Unix system calls the process has made so far (a 32-bit count that wraps). macOS only
-    /// gives this for your own processes, unless the caller is root.
-    static func unixSyscalls(_ pid: pid_t) -> UInt32? {
-        var ti = proc_taskinfo()
-        let size = Int32(MemoryLayout<proc_taskinfo>.size)
-        guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, size) == size else { return nil }
-        return UInt32(bitPattern: ti.pti_syscalls_unix)
-    }
-
     /// Adds every process we could not read ourselves, using /bin/ps.
     private func collectOthers(into out: inout [pid_t: Raw]) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-axo", "pid=,rss=,time=,comm="]
+        p.arguments = ["-axo", "pid=,rss=,time=,stime=,comm="] // stime: the kernel's part of time
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
@@ -212,11 +199,12 @@ final class ProcessMonitor {
         p.waitUntilExit()
         guard let text = String(data: data, encoding: .utf8) else { return }
         for line in text.split(separator: "\n") {
-            let f = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
-            guard f.count == 4, let pid = pid_t(f[0]), out[pid] == nil, let rssKB = Double(f[1]) else { continue }
-            let comm = String(f[3])
+            let f = line.split(separator: " ", maxSplits: 4, omittingEmptySubsequences: true)
+            guard f.count == 5, let pid = pid_t(f[0]), out[pid] == nil, let rssKB = Double(f[1]) else { continue }
+            let comm = String(f[4])
             let name = comm.hasPrefix("/") ? (comm as NSString).lastPathComponent : comm
-            out[pid] = Raw(name: name, cpuNs: Self.parseCPUTime(f[2]), mem: rssKB * 1024, disk: nil)
+            out[pid] = Raw(name: name, cpuNs: Self.parseCPUTime(f[2]), mem: rssKB * 1024, disk: nil,
+                           kernelNs: Self.parseCPUTime(f[3]))
         }
     }
 

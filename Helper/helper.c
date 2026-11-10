@@ -1,13 +1,14 @@
 // macmon-indicator-helper: optional, read-only root helper for MacMon Indicator.
 //
 // Started on demand by launchd when the app connects to its socket. It answers a single
-// request, "snapshot\n", with per-process CPU time, memory footprint and disk bytes for
+// request, "snapshot\n", with per-process CPU time (and its kernel part), memory footprint and disk bytes for
 // every process, then waits for the next connection. It exits after 30 s without requests.
 // It accepts no other commands, never writes files, and only answers the user id given
 // with --uid (plus root).
 //
-// Output: "v1\n" then one line per process:
-//   pid \t cpu_ns \t phys_footprint \t disk_bytes_read \t disk_bytes_written \t name
+// Output: "v2\n" then one line per process:
+//   pid \t cpu_ns \t kernel_ns \t phys_footprint \t disk_bytes_read \t disk_bytes_written \t name
+// (v1, before kernel time, had no kernel_ns column; the app reads both.)
 //
 // Debug modes (no root needed, shows only your own processes):
 //   macmon-indicator-helper --stdout
@@ -32,6 +33,8 @@
 
 static mach_timebase_info_data_t tb;
 
+static uint64_t to_ns(uint64_t t) { return t / tb.denom * tb.numer + (t % tb.denom) * tb.numer / tb.denom; }
+
 static int write_all(int fd, const char *buf, size_t len) {
     while (len > 0) {
         ssize_t n = write(fd, buf, len);
@@ -54,17 +57,16 @@ static void write_snapshot(int fd) {
     if (!pids || !out) { free(pids); free(out); return; }
     int n = proc_listallpids(pids, (int)(cap * sizeof(pid_t)));
     size_t len = 0;
-    len += (size_t)snprintf(out, 8, "v1\n");
+    len += (size_t)snprintf(out, 8, "v2\n");
     for (int i = 0; i < n && (size_t)i < cap; i++) {
         struct rusage_info_v4 ru;
         if (proc_pid_rusage(pids[i], RUSAGE_INFO_V4, (rusage_info_t *)&ru) != 0) continue;
         char name[2 * MAXCOMLEN + 1] = {0};
         if (proc_name(pids[i], name, sizeof(name)) <= 0) strcpy(name, "?");
         for (char *c = name; *c; c++) if (*c == '\t' || *c == '\n') *c = ' ';
-        uint64_t t = ru.ri_user_time + ru.ri_system_time;
-        uint64_t ns = t / tb.denom * tb.numer + (t % tb.denom) * tb.numer / tb.denom;
-        int w = snprintf(out + len, LINE_MAX_LEN, "%d\t%llu\t%llu\t%llu\t%llu\t%s\n", pids[i],
-                         (unsigned long long)ns, (unsigned long long)ru.ri_phys_footprint,
+        int w = snprintf(out + len, LINE_MAX_LEN, "%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\n", pids[i],
+                         (unsigned long long)to_ns(ru.ri_user_time + ru.ri_system_time),
+                         (unsigned long long)to_ns(ru.ri_system_time), (unsigned long long)ru.ri_phys_footprint,
                          (unsigned long long)ru.ri_diskio_bytesread,
                          (unsigned long long)ru.ri_diskio_byteswritten, name);
         if (w > 0 && w < LINE_MAX_LEN) len += (size_t)w; // drop (never expected) over-long lines

@@ -5,7 +5,7 @@ import AppKit
 /// to go back). A tall window shows more rows.
 final class ProcessListView: NSView {
     /// Raw values are saved in the settings, so new columns get new numbers.
-    enum Sort: Int { case cpu, ram, disk, time, syscalls }
+    enum Sort: Int { case cpu, ram, disk, time, kernel } // kernel took the place of system calls
 
     static let headerH: CGFloat = 20, rowH: CGFloat = 17, noteH: CGFloat = 16
     static let defaultRows = 10
@@ -26,10 +26,11 @@ final class ProcessListView: NSView {
 
     private let inset = Dashboard.inset
     /// Columns left to right. CPU time is the total since the process started, as in Activity Monitor.
-    /// Syscalls are system calls per second (your processes only), the per-process sign of heavy
-    /// file work: macOS doesn't count disk operations per process.
+    /// Kernel is the part of CPU spent in the kernel on the process's behalf (system calls, page
+    /// faults): the per-process sign of heavy file work, since macOS doesn't count disk operations
+    /// per process.
     private let columns: [(sort: Sort, title: String, width: CGFloat)] = [
-        (.cpu, "CPU", 46), (.time, "CPU time", 62), (.ram, "RAM", 46), (.disk, "Disk", 56), (.syscalls, "Syscalls", 60),
+        (.cpu, "CPU", 46), (.time, "CPU time", 62), (.ram, "RAM", 50), (.disk, "Disk", 58), (.kernel, "Kernel", 54),
     ]
     private let font = NSFont.systemFont(ofSize: 11)
     private let numFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
@@ -52,7 +53,7 @@ final class ProcessListView: NSView {
         case .ram: return r.mem
         case .disk: return r.disk ?? -1
         case .time: return r.cpuTime
-        case .syscalls: return r.syscalls ?? -1
+        case .kernel: return r.kernel ?? -1
         }
     }
 
@@ -69,7 +70,7 @@ final class ProcessListView: NSView {
                 var n = 0
                 for r in rows.sorted(by: { key($0, s) > key($1, s) }) where !seen.contains(r.pid) {
                     if s == .disk && (r.disk ?? 0) < Self.minDiskBps { break } // ignore idle disk users
-                    if s == .syscalls && r.syscalls == nil { break }        // not known yet, or a system process
+                    if s == .kernel && r.kernel == nil { break }            // not known yet
                     out.append((r, s)); seen.insert(r.pid); n += 1
                     if n == each { break }
                 }
@@ -124,15 +125,15 @@ final class ProcessListView: NSView {
             let r = item.row
             (r.name as NSString).draw(in: NSRect(x: inset, y: y, width: nameW, height: Self.rowH),
                                       withAttributes: [.font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: para])
-            let cpu = r.cpu.map { $0 < 9.95 ? String(format: "%.1f%%", $0) : String(format: "%.0f%%", $0) } ?? Fmt.dash
+            let pct = { (v: Double?) in v.map { $0 < 9.95 ? String(format: "%.1f%%", $0) : String(format: "%.0f%%", $0) } ?? Fmt.dash }
             for (c, col) in columns.enumerated() {
                 let text: String
                 switch col.sort {
-                case .cpu: text = cpu
+                case .cpu: text = pct(r.cpu)
                 case .time: text = Fmt.duration(r.cpuTime)
                 case .ram: text = Fmt.bytes(r.mem)
                 case .disk: text = Fmt.rate(r.disk)
-                case .syscalls: text = r.syscalls.map { Fmt.ops(Float($0)) } ?? Fmt.dash
+                case .kernel: text = pct(r.kernel)
                 }
                 let strong = item.reason == col.sort
                 drawRight(text, x: columnX(c), w: col.width, y: y + 1,
@@ -144,6 +145,8 @@ final class ProcessListView: NSView {
         if let snap = snapshot {
             if snap.helperFailed {
                 note = "Root helper not reachable. Showing your processes only."
+            } else if snap.helperOutdated {
+                note = "Root helper is out of date: turn system processes off and on in Settings for kernel time."
             } else if let hidden = snap.hiddenDiskBps, hidden >= 50_000 {
                 note = "System processes: \(Fmt.rate(hidden)) disk (turn on root mode to see which)"
             }

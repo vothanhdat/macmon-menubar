@@ -58,21 +58,21 @@ enum SnapshotMode {
 
     /// Fixed process list for public screenshots (so they don't show what you are running).
     private static func demoProcessSnapshot() -> ProcSnapshot {
-        // Name, CPU %, CPU time (s), RAM, disk (bytes/s), syscalls/s (nil: a system process).
+        // Name, CPU %, CPU time (s), RAM, disk (bytes/s, nil: a system process), kernel %.
         let rows: [(String, Double, Double, Double, Double?, Double?)] = [
-            ("Xcode", 48.2, 8040, 2.1e9, 1.2e6, 12_400), ("WindowServer", 21.5, 19860, 2.6e8, nil, nil),
-            ("Safari", 6.1, 2460, 1.4e9, 0.3e6, 4100), ("Docker", 3.4, 3900, 1.1e9, 0.2e6, 2300),
-            ("Spotlight", 4.2, 725, 9.0e7, 6.3e6, 48_000), ("cloudd", 1.1, 48.3, 6.0e7, 2.4e6, 650),
+            ("Xcode", 48.2, 8040, 2.1e9, 1.2e6, 6.1), ("WindowServer", 21.5, 19860, 2.6e8, nil, 9.8),
+            ("Safari", 6.1, 2460, 1.4e9, 0.3e6, 1.2), ("Docker", 3.4, 3900, 1.1e9, 0.2e6, 1.9),
+            ("Spotlight", 4.2, 725, 9.0e7, 6.3e6, 3.6), ("cloudd", 1.1, 48.3, 6.0e7, 2.4e6, 0.4),
             // Mostly below the top 2 by every column, so only a taller window shows them.
-            ("Slack", 2.8, 5400, 6.5e8, 0.4e6, 1900), ("mds_stores", 3.1, 2900, 8.0e7, 1.9e6, nil),
-            ("Terminal", 2.1, 860, 1.2e8, nil, 310), ("Mail", 0.6, 2210, 3.1e8, 0.1e6, 420),
-            ("Finder", 0.8, 1520, 1.8e8, 0.05e6, 880), ("Music", 0.9, 640, 2.2e8, 0, 150),
-            ("kernel_task", 2.4, 31_400, 9.0e6, nil, nil), ("Notes", 0.3, 310, 1.5e8, 0, 60),
+            ("Slack", 2.8, 5400, 6.5e8, 0.4e6, 0.6), ("mds_stores", 3.1, 2900, 8.0e7, 1.9e6, 2.7),
+            ("Terminal", 2.1, 860, 1.2e8, nil, 0.5), ("Mail", 0.6, 2210, 3.1e8, 0.1e6, 0.1),
+            ("Finder", 0.8, 1520, 1.8e8, 0.05e6, 0.3), ("Music", 0.9, 640, 2.2e8, 0, 0.2),
+            ("kernel_task", 2.4, 31_400, 9.0e6, nil, 2.4), ("Notes", 0.3, 310, 1.5e8, 0, 0.1),
         ]
         var snap = ProcSnapshot()
         snap.rows = rows.enumerated().map { ProcRow(pid: pid_t(1000 + $0.offset), name: $0.element.0, cpu: $0.element.1,
                                                    cpuTime: $0.element.2, mem: $0.element.3, disk: $0.element.4,
-                                                   syscalls: $0.element.5) }
+                                                   kernel: $0.element.5) }
         snap.hiddenDiskBps = 1.8e6
         return snap
     }

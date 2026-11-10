@@ -21,7 +21,7 @@ _Screenshots use demo history and demo process names._
   RAM and Temp bars blend into red as they near your warning limits, and values past a limit show
   in red. Hover to read values at any moment. **Click a chart** to see it alone at full width with its
   scale; click again to go back. Chart height is adjustable.
-- **Top processes**: CPU, CPU time, RAM, disk and system calls. By default you get the top 2 by each
+- **Top processes**: CPU, CPU time, RAM, disk and kernel time. By default you get the top 2 by each
   column (10 rows); click a column to see the top 10 by that column (click again to go back).
 - **Dashboard window**: click the window button next to "Now" in the menu (or **Open in Window**)
   to keep the charts and processes on screen. Resize it and the charts grow and the process list
@@ -97,8 +97,9 @@ Measured on a MacBook Pro M4 Pro, on battery, 5 s interval, menu closed:
 | **Total** | **~0.5–0.7%** | **~22–31 MB** |
 
 At the default 2 s interval on power, expect roughly twice the CPU. While the menu is open, or the
-dashboard window can be seen, it samples every second and scans processes every 2 s (about 2% of
-one core). A minimized, covered or hidden window costs nothing: updates pause until it shows again.
+dashboard window can be seen, it samples every second and scans processes every 2 s: about 2% of
+one core for the app, plus about 1.6% for the `/bin/ps` run it uses to read system processes (about
+30 ms of CPU each time; root mode does without it). A minimized, covered or hidden window costs nothing: updates pause until it shows again.
 A bigger window doesn't draw slower (about 1 ms per update at any size); it needs a few MB more for
 its picture. While you drag its edge it lays out and redraws only when you pause or let go. macOS also uses up to ~170 MB of graphics memory
 for the menu's glass window and frees it 20 to 40 s after the menu closes. The first time the menu is
@@ -167,8 +168,11 @@ helper ([`Helper/helper.c`](Helper/helper.c), ~150 lines):
 
 - `/Library/PrivilegedHelperTools/local.MacMonIndicator.helper` + a LaunchDaemon plist
 - **Started on demand** by launchd when the menu asks for data. It **exits after 30 s** idle.
-- **Read-only.** It answers exactly one request (`snapshot`) with per-process CPU time, memory and
-  disk bytes. It accepts no other commands, writes no files, and only answers your user id.
+- **Read-only.** It answers exactly one request (`snapshot`) with per-process CPU time (and the
+  kernel's part of it), memory and disk bytes. It accepts no other commands, writes no files, and
+  only answers your user id.
+- **After an update,** a helper installed by an older version keeps working but doesn't report
+  kernel time; the process list says so. Turn the setting off and on to install the new one.
 
 Turning it off removes it (asks for the password again). Manual removal:
 
@@ -183,12 +187,13 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
   In the process list it's % of **one** core, so a busy process can show more than 100%.
 - **CPU time** in the process list is the total CPU a process has used since it started, as in
   Activity Monitor. Sort by it to find what has been busy all along, not just right now.
-- **Syscalls** in the process list is system calls per second: opening, reading or listing a file
-  is one each. macOS doesn't count disk operations per process, and this is the closest it gets: a
-  process walking or checking many small files makes hundreds of thousands a second, while busy apps
-  at rest make a few thousand. It also catches file work served from memory, which the drive never
-  sees. Other kinds of calls (network, timers) count too, so only large numbers point to file churn.
-  macOS only reports it for your own processes, also in root mode; system processes show "–".
+- **Kernel** in the process list is the part of a process's CPU spent in the kernel on its behalf:
+  system calls (opening, reading, listing files), page faults, talking to hardware. macOS doesn't
+  count disk operations per process, and this is the closest sign of heavy file work: a process
+  walking or checking many small files spends most of its CPU here (a test job: 86% of a core),
+  even when the files come from memory and the drive never sees them. Busy apps at rest stay around
+  1-3%; WindowServer is often higher because drawing goes through the kernel. Time spent waiting
+  (for a slow disk, say) isn't CPU time and doesn't count.
 - **GPU %** is frequency-weighted, as macmon reports it.
 - **Temperatures** are macmon's CPU/GPU averages. **Power** "System" is the whole machine.
 - **Battery** is + when charging and − when discharging.
