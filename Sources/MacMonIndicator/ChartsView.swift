@@ -285,9 +285,9 @@ final class ChartsView: NSView {
         let start = history.bucketStart(tier: tier, index: 0, now: now)
         let ticks = timeTicks(from: start, span: span)
         let px = 1 / (window?.backingScaleFactor ?? 2)
-        // A light menu turns grey over a dark wallpaper, and the faint chart tints go grey with it.
-        // A half-white backing pulls each chart back toward white; over a light wallpaper it
-        // changes next to nothing. Windows have an opaque background and skip it.
+        // A light menu turns grey over a dark wallpaper, and the faint fills go grey with it. A
+        // white backing under the bars, fading out toward the base, keeps the fills light; over a
+        // light wallpaper it changes next to nothing. Windows have an opaque background and skip it.
         let lightMenu = enclosingMenuItem != nil && effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
 
         for c in cells() {
@@ -296,23 +296,6 @@ final class ChartsView: NSView {
 
             (row.title as NSString).draw(at: NSPoint(x: c.origin.x, y: c.origin.y - 1),
                                          withAttributes: [.font: titleFont, .foregroundColor: NSColor.secondaryLabelColor])
-
-            // Chart: rounded track tinted with the chart's color; everything below is clipped to it.
-            ctx.saveGState()
-            ctx.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
-            ctx.clip()
-            if lightMenu {
-                ctx.setFillColor(NSColor.white.withAlphaComponent(Self.menuBacking).cgColor)
-                ctx.fill(rect)
-            }
-            ctx.setFillColor(row.color.withAlphaComponent(0.08).cgColor)
-            ctx.fill(rect)
-
-            // Time gridlines, one device pixel wide, under the bars.
-            ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.1).cgColor)
-            for t in ticks {
-                ctx.fill(CGRect(x: tickX(t, in: rect, start: start, span: span, px: px), y: rect.minY, width: px, height: rect.height))
-            }
 
             history.window(tier: tier, series: row.series, now: now, avg: &avgBuf, max: &maxBuf)
             if case .mirrored(let down) = row.shape {
@@ -323,17 +306,38 @@ final class ChartsView: NSView {
             var lowerHi = r.hi
             if case .mirrored = row.shape { lowerHi = range(row, lowerHalf: true).hi }
             let limit = row.limit?(thresholds, latest)
-            switch row.shape {
-            case .up:
-                drawBars(ctx, rect, bw, avgBuf, maxBuf, r.lo, r.hi, row.color, from: .bottom, warn: warnRange(row, limit: limit))
-            case .signed:
-                drawBars(ctx, rect, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .center)
-            case .mirrored:
-                var top = rect; top.size.height /= 2
-                var bottom = top; bottom.origin.y += top.height
-                drawBars(ctx, top, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .bottom)
-                drawBars(ctx, bottom, bw, avgBuf2, maxBuf2, 0, lowerHi, row.color2 ?? row.color, from: .top)
+            /// The bars, or with `backing` only the white backing under them.
+            func bars(backing: Bool) {
+                switch row.shape {
+                case .up:
+                    drawBars(ctx, rect, bw, avgBuf, maxBuf, r.lo, r.hi, row.color, from: .bottom,
+                             warn: warnRange(row, limit: limit), backing: backing)
+                case .signed:
+                    drawBars(ctx, rect, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .center, backing: backing)
+                case .mirrored:
+                    var top = rect; top.size.height /= 2
+                    var bottom = top; bottom.origin.y += top.height
+                    drawBars(ctx, top, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .bottom, backing: backing)
+                    drawBars(ctx, bottom, bw, avgBuf2, maxBuf2, 0, lowerHi, row.color2 ?? row.color, from: .top, backing: backing)
+                }
             }
+
+            // Chart: rounded track tinted with the chart's color; everything below is clipped to it.
+            // The backing goes first, so the tint and the gridlines still show through the fill.
+            ctx.saveGState()
+            ctx.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
+            ctx.clip()
+            if lightMenu { bars(backing: true) }
+            ctx.setFillColor(row.color.withAlphaComponent(0.08).cgColor)
+            ctx.fill(rect)
+
+            // Time gridlines, one device pixel wide, under the bars.
+            ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.1).cgColor)
+            for t in ticks {
+                ctx.fill(CGRect(x: tickX(t, in: rect, start: start, span: span, px: px), y: rect.minY, width: px, height: rect.height))
+            }
+
+            bars(backing: false)
 
             // Warning limit as a dashed line, if it is inside the visible range.
             if let limit, limit > r.lo, limit < r.hi {
@@ -759,7 +763,7 @@ final class ChartsView: NSView {
 
     private enum Anchor { case bottom, top, center }
 
-    /// Opacity of the white backing under each chart in a light menu.
+    /// Opacity of the white backing under the bars in a light menu, at full height (clear at the base).
     private static let menuBacking: CGFloat = 0.6
 
     /// Opacity of the average's gradient fill at the top and the bottom of the chart.
@@ -783,9 +787,12 @@ final class ChartsView: NSView {
     /// With a warning range (`warn`), the color follows the value: the chart's color below
     /// `start`, blending into red up to `limit`, red from there up. It depends on the value, not on
     /// the bar's height, so it means the same on a zoomed-in scale.
+    ///
+    /// With `backing`, it only fills the area the bars cover (peaks and average) with white, fading
+    /// from `menuBacking` at full height to clear at the base.
     private func drawBars(_ ctx: CGContext, _ rect: CGRect, _ bw: CGFloat, _ avg: [Float], _ mx: [Float],
                           _ lo: Float, _ hi: Float, _ color: NSColor, from anchor: Anchor,
-                          warn: (start: Float, limit: Float)? = nil) {
+                          warn: (start: Float, limit: Float)? = nil, backing: Bool = false) {
         guard hi > lo else { return }
         // Buckets touch (a stepped area under the edge line); the slight overlap avoids hairline seams.
         let width = bw + 0.3
@@ -815,6 +822,37 @@ final class ChartsView: NSView {
             }
         }
         let visible: (Float) -> Bool = { $0.isFinite && height($0) > 0.01 }
+        /// Fills the current path with a gradient over the chart: its first color at full height
+        /// (where the tips reach), its last at the anchor.
+        func fillTipToBase(_ gradient: CGGradient) {
+            ctx.saveGState()
+            ctx.clip()
+            switch anchor {
+            case .bottom:
+                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.minY), end: CGPoint(x: 0, y: rect.maxY), options: [])
+            case .top:
+                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.maxY), end: CGPoint(x: 0, y: rect.minY), options: [])
+            case .center:
+                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.minY), end: CGPoint(x: 0, y: rect.midY), options: [])
+                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.maxY), end: CGPoint(x: 0, y: rect.midY), options: [])
+            }
+            ctx.restoreGState()
+        }
+
+        if backing {
+            // One path, clipped once (nonzero winding), so overlapping bars don't stack the alpha.
+            // It fades out toward the base like the average's fill.
+            let area = CGMutablePath()
+            for (i, v) in mx.enumerated() where visible(v) { area.addRect(barRect(i, v)) }
+            for (i, v) in avg.enumerated() where visible(v) { area.addRect(barRect(i, v)) }
+            if !area.isEmpty, let g = CGGradient(colorsSpace: nil, colors: [NSColor.white.withAlphaComponent(Self.menuBacking).cgColor,
+                                                                           NSColor.white.withAlphaComponent(0).cgColor] as CFArray,
+                                                 locations: [0, 1]) {
+                ctx.addPath(area)
+                fillTipToBase(g)
+            }
+            return
+        }
 
         // Warning colors, only for upward bars and only when some value reaches the fade.
         let heat: ((CGFloat, CGFloat) -> CGGradient?)? = {
@@ -854,19 +892,8 @@ final class ChartsView: NSView {
         } else if !path.isEmpty, let gradient = CGGradient(colorsSpace: nil, colors: [color.withAlphaComponent(Self.avgAlpha.tip).cgColor,
                                                                                     color.withAlphaComponent(Self.avgAlpha.base).cgColor] as CFArray,
                                                           locations: [0, 1]) {
-            ctx.saveGState()
             ctx.addPath(path)
-            ctx.clip()
-            switch anchor {
-            case .bottom:
-                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.minY), end: CGPoint(x: 0, y: rect.maxY), options: [])
-            case .top:
-                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.maxY), end: CGPoint(x: 0, y: rect.minY), options: [])
-            case .center:
-                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.minY), end: CGPoint(x: 0, y: rect.midY), options: [])
-                ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: rect.maxY), end: CGPoint(x: 0, y: rect.midY), options: [])
-            }
-            ctx.restoreGState()
+            fillTipToBase(gradient)
         }
 
         // Edge: a stepped line along the tips; it breaks at gaps (no data).
