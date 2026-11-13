@@ -285,6 +285,10 @@ final class ChartsView: NSView {
         let start = history.bucketStart(tier: tier, index: 0, now: now)
         let ticks = timeTicks(from: start, span: span)
         let px = 1 / (window?.backingScaleFactor ?? 2)
+        // A light menu turns grey over a dark wallpaper, and the faint chart tints go grey with it.
+        // A half-white backing pulls each chart back toward white; over a light wallpaper it
+        // changes next to nothing. Windows have an opaque background and skip it.
+        let lightMenu = enclosingMenuItem != nil && effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
 
         for c in cells() {
             let row = c.row, rect = c.chart
@@ -297,6 +301,10 @@ final class ChartsView: NSView {
             ctx.saveGState()
             ctx.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
             ctx.clip()
+            if lightMenu {
+                ctx.setFillColor(NSColor.white.withAlphaComponent(Self.menuBacking).cgColor)
+                ctx.fill(rect)
+            }
             ctx.setFillColor(row.color.withAlphaComponent(0.08).cgColor)
             ctx.fill(rect)
 
@@ -750,6 +758,9 @@ final class ChartsView: NSView {
     }
 
     private enum Anchor { case bottom, top, center }
+
+    /// Opacity of the white backing under each chart in a light menu.
+    private static let menuBacking: CGFloat = 0.6
 
     /// Opacity of the average's gradient fill at the top and the bottom of the chart.
     private static let avgAlpha: (tip: CGFloat, base: CGFloat) = (0.5, 0.04)
