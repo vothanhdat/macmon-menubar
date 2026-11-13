@@ -993,14 +993,14 @@ extension ChartsView {
                 }.with(axis: { $0.isFinite ? "\(Int($0.rounded())) rpm" : Fmt.dash })
             case .disk:
                 return Row(id: id, series: .diskRead, shape: .mirrored(.diskWrite), scale: .auto(min: 10),
-                           color: .systemBlue, color2: .systemTeal) { v, _ in
+                           color: .systemBlue, color2: .systemPink) { v, _ in
                     ("R " + Fmt.num(v(.diskRead)) + " · W " + Fmt.num(v(.diskWrite)) + " MB/s", nil)
                 }.with(axis: { $0 >= 999.5 ? Fmt.num($0 / 1000) + " GB/s" : Fmt.num($0) + " MB/s" })
             case .diskOps:
                 // Operations per second: many small reads or writes slow the Mac down while the
                 // MB/s stay low. Idle is usually well under 1000.
                 return Row(id: id, series: .diskReadOps, shape: .mirrored(.diskWriteOps), scale: .auto(min: 1000),
-                           color: .systemBlue, color2: .systemTeal) { v, _ in
+                           color: .systemBlue, color2: .systemPink) { v, _ in
                     ("R " + Fmt.ops(v(.diskReadOps)) + " · W " + Fmt.ops(v(.diskWriteOps)) + " ops/s", nil)
                 }.with(axis: { Fmt.ops($0) + " ops/s" })
             }
