@@ -6,6 +6,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     var onClose: (() -> Void)?
     var macmonStatus: () -> String = { "" }
     var exportCSV: (() -> Void)?
+    var clearProcessHistory: (() -> Void)?
 
     private let s = Settings.shared
     private var slotPopups: [NSPopUpButton] = []
@@ -35,6 +36,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let loginBox = NSButton(checkboxWithTitle: "Launch at login", target: nil, action: nil)
     private let restartBox = NSButton(checkboxWithTitle: "Free memory while the display sleeps", target: nil, action: nil)
     private let rootBox = NSButton(checkboxWithTitle: "Show system processes (root helper)", target: nil, action: nil)
+    private let historyBox = NSButton(checkboxWithTitle: "Keep process history", target: nil, action: nil)
     private let macmonLabel = NSTextField(wrappingLabelWithString: "")
     private let acChoices = [1000, 2000, 3000, 5000]
     private let batteryChoices = [2000, 5000, 10000]
@@ -225,6 +227,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         rootBox.target = self
         rootBox.action = #selector(rootChanged)
 
+        historyBox.state = s.trackProcesses ? .on : .off
+        historyBox.target = self
+        historyBox.action = #selector(historyChanged)
+        let clear = NSButton(title: "Clear…", target: self, action: #selector(clearHistoryClicked))
+        clear.bezelStyle = .rounded
+        let historyRow = NSStackView(views: [historyBox, clear])
+        historyRow.spacing = 12
+
         macmonLabel.stringValue = macmonStatus()
         macmonLabel.font = .systemFont(ofSize: 11)
         macmonLabel.textColor = .secondaryLabelColor
@@ -250,14 +260,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [label("General", bold: true), loginBox],
             [NSGridCell.emptyContentView, restartBox],
             [NSGridCell.emptyContentView, rootBox],
-            [NSGridCell.emptyContentView, note("Lets the process list show disk use of system processes such as Spotlight and Time Machine. Turning it on or off asks for your admin password. The helper is read-only and only runs while the menu is open.")],
+            [NSGridCell.emptyContentView, note("Lets the process list show disk use of system processes such as Spotlight and Time Machine. Turning it on or off asks for your admin password. The helper is read-only and only runs while the menu is open, and briefly every 5 minutes for process history.")],
+            [label("Processes", bold: true), historyRow],
+            [NSGridCell.emptyContentView, note("Every 5 minutes, adds up each app's and program's running time, launches, CPU time, CPU energy, memory and disk use. Kept for 90 days on this Mac only. See it under Process History in the menu.")],
             [label("macmon", bold: true), macmonLabel],
             [NSGridCell.emptyContentView, export],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
-        for r in [0, 5, 9, 10, 12, 16] { grid.row(at: r).yPlacement = .center }
+        for r in [0, 5, 9, 10, 12, 16, 18] { grid.row(at: r).yPlacement = .center }
         grid.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -379,6 +391,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func exportClicked() { exportCSV?() }
+
+    @objc private func historyChanged() { s.trackProcesses = historyBox.state == .on }
+
+    @objc private func clearHistoryClicked() {
+        let a = NSAlert()
+        a.messageText = "Clear process history?"
+        a.informativeText = "This deletes the running time, CPU, energy, memory and disk statistics of every app and program. It can't be undone."
+        a.addButton(withTitle: "Clear")
+        a.addButton(withTitle: "Cancel")
+        a.buttons.first?.hasDestructiveAction = true
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        clearProcessHistory?()
+    }
 
     private func showAlert(_ title: String, _ text: String) {
         let a = NSAlert()

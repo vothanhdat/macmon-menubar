@@ -251,6 +251,93 @@ enum SnapshotMode {
         exit(0)
     }
 
+    /// `--process-history <dir>`: runs the process tracker on a throwaway file with 3 s scans,
+    /// restarts it once (as a quit and relaunch would), prints the top programs, and renders the
+    /// Process History window as process-history-light.png and -dark.png. The images show the
+    /// processes running on this Mac.
+    static func processHistoryPreview(to dir: String) {
+        setenv("MACMON_DEBUG_PROCESS_INTERVAL", "3", 1)
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        // MACMON_DEBUG_PROCESS_DIR: keep the file there (to look at it, or to run again on it).
+        let keep = ProcessInfo.processInfo.environment["MACMON_DEBUG_PROCESS_DIR"].map { URL(fileURLWithPath: $0) }
+        let tmp = keep ?? FileManager.default.temporaryDirectory.appendingPathComponent("macmon-indicator-proc-\(getpid())")
+        if keep == nil { try? FileManager.default.removeItem(at: tmp) }
+        var tracker = ProcessTracker(directory: tmp)
+        var scans = 0
+        func finish() {
+            tracker.stop()
+            tracker.summary(.week) { w in
+                print(String(format: "7 days: CPU %.1f s in %d programs", w.programs.reduce(0) { $0 + ($1.path.hasSuffix(".app") ? 0 : $1.stats.cpu) },
+                             w.programs.count))
+            }
+            tracker.summary(.today) { s in
+                let execs = s.programs.filter { !ProcKey.isApp($0.path) }
+                let found = execs.reduce(0) { $0 + $1.stats.cpu }
+                print(String(format: "today: %d executables, %d apps; CPU found %.1f s, unseen %.1f s; energy %.1f J",
+                             execs.count, s.programs.count - execs.count, found, s.unseen.cpu,
+                             execs.reduce(0) { $0 + $1.stats.energy }))
+                print("name                           running launch exit copies   cpu s energy J   ram avg  ram peak      read   written")
+                for p in s.programs.sorted(by: { $0.stats.cpu > $1.stats.cpu }).prefix(15) {
+                    let t = p.stats
+                    let name = String(ProcKey.name(p.path).prefix(30))
+                    print(name.padding(toLength: 30, withPad: " ", startingAt: 0) + String(format: " %7.0f %6d %4d %6.2f %7.2f %8.2f %9@ %9@ %9@ %9@",
+                                 t.running, t.launches, t.exits,
+                                 t.running > 0 ? t.copyTime / t.running : 0, t.cpu, t.energy,
+                                 HistoryFmt.bytes(t.running > 0 ? t.ramTime / t.running : 0) as NSString,
+                                 HistoryFmt.bytes(t.ramPeak) as NSString,
+                                 HistoryFmt.bytes(t.detail ? t.diskRead : -1) as NSString,
+                                 HistoryFmt.bytes(t.detail ? t.diskWritten : -1) as NSString))
+                }
+                let wc = ProcessHistoryWindowController(tracker: tracker)
+                wc.window?.setContentSize(NSSize(width: 1100, height: 620))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    guard let view = wc.window?.contentView else { exit(1) }
+                    wc.window?.contentView = NSView()
+                    view.frame.size = NSSize(width: 1100, height: 620)
+                    for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                        var bg = NSColor.windowBackgroundColor
+                        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+                            bg = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? bg
+                        }
+                        write(view, appearance: appearance, background: bg, padding: 0, to: "\(dir)/process-history-\(name).png")
+                    }
+                    if keep == nil { try? FileManager.default.removeItem(at: tmp) }
+                    print("Wrote \(dir)/process-history-light.png and process-history-dark.png")
+                    exit(0)
+                }
+            }
+        }
+        func onScan() {
+            scans += 1
+            print("scan \(scans)")
+            if scans == 3 {
+                // Quit and relaunch: the new tracker continues from what the old one saved.
+                tracker.stop()
+                tracker = ProcessTracker(directory: tmp)
+                tracker.onScan = onScan
+                tracker.start()
+            } else if scans == 5 {
+                finish()
+            }
+        }
+        // With MACMON_INDICATOR_HELPER_SOCKET pointing at `macmon-indicator-helper --socket <path>`:
+        // checks that the helper's output reads back.
+        if ProcessInfo.processInfo.environment["MACMON_INDICATOR_HELPER_SOCKET"] != nil {
+            if let h = RootHelper.snapshot() {
+                let p = h.processes.values
+                print("helper v\(h.version): \(p.count) processes, \(p.filter { $0.path != nil }.count) with path, " +
+                      "\(p.filter { ($0.energyNj ?? 0) > 0 }.count) with energy, \(p.filter { $0.startUs != nil }.count) with start time")
+            } else {
+                print("helper not reachable")
+            }
+        }
+        tracker.onScan = onScan
+        tracker.start()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { print("timed out"); exit(1) }
+        NSApplication.shared.run()
+    }
+
     // MARK: - Menu bar look previews
 
     /// `--bar-previews <file.png>`: a sheet of menu bar looks (text size × spacing, plus opacity),

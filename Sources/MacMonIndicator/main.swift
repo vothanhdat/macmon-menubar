@@ -16,6 +16,9 @@ if let i = args.firstIndex(of: "--settings") {
 if let i = args.firstIndex(of: "--about") {
     SnapshotMode.aboutPreview(to: i + 1 < args.count ? args[i + 1] : "about")
 }
+if let i = args.firstIndex(of: "--process-history") {
+    SnapshotMode.processHistoryPreview(to: i + 1 < args.count ? args[i + 1] : "process-history")
+}
 if let i = args.firstIndex(of: "--snapshot") {
     SnapshotMode.run(outputDir: i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : "snapshots",
                      demoProcesses: args.contains("--demo"))

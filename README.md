@@ -31,6 +31,11 @@ _Screenshots use demo history and demo process names._
 - **Battery** charge/discharge watts, **disk** read/write throughput and **disk operations** per
   second. Many small reads or writes (a big `git status`, an indexer, a package install) can slow
   the whole Mac while the MB/s stay low; the **Disk ops** chart shows them.
+- **Process History** (in the menu): every 5 minutes, in the background, the app adds up what each
+  app and program used: running time, launches, average lifetime, copies running at once, CPU time,
+  CPU energy and average power, average and peak memory, disk read and written. Programs are kept by
+  path, not pid, and an app's helper processes add up under the app (or see each executable). Pick
+  Today, 24 hours, 7, 30 or 90 days; click a column to sort. See [Process history](#process-history).
 - **Optional root mode** to see disk use of system processes (Spotlight, Time Machine, …).
 - Starts at login, no Dock icon (unless the dashboard window is open), stays out of the way.
 
@@ -82,10 +87,10 @@ Other commands: `make app` (build only, into `build/`), `make run`, `make uninst
 
 ## Using it
 
-- **Click** (left or right): the menu with charts, top processes, **Open in Window**, **About**, **Settings… (⌘,)** and **Quit (⌘Q)**. About shows the version and the macmon version in use.
+- **Click** (left or right): the menu with charts, top processes, **Open in Window**, **Process History**, **About**, **Settings… (⌘,)** and **Quit (⌘Q)**. About shows the version and the macmon version in use.
 - **Settings**: menu bar slots, icons, one or two lines, text size, spacing, edge padding and opacity
   (the menu bar updates live while you drag), menu charts (which, order, columns, value position, height), update interval (on power / on battery), warning limits, launch at
-  login, free memory while the display sleeps, root mode, CSV export.
+  login, free memory while the display sleeps, root mode, process history (on or off, clear), CSV export.
 
 ## Resource use
 
@@ -155,9 +160,37 @@ macmon pipe -i <ms> ──JSON lines──▶ MacMonIndicator.app
                                                               or the root helper (everything)
 ```
 
-History lives in `~/Library/Application Support/MacMonIndicator/history.bin`. Time when the Mac was
+History lives in `~/Library/Application Support/MacMonIndicator/history.bin`, process history in
+`process-history.sqlite` next to it. Time when the Mac was
 asleep or the app wasn't running shows as a gap. Export it from Settings as CSV. The file records its
 own layout, so when a new version adds a range, the existing ranges are kept.
+
+## Process history
+
+Every 5 minutes the app reads each process's running totals (CPU time, CPU energy, disk bytes) and
+adds what changed since the last scan to its program's hour. Because the totals keep counting
+between scans, a process that is running at two scans is counted exactly, however short its bursts.
+What 5-minute scans miss:
+
+- processes that start and end between two scans (a quick `git`, a compiler run), and
+- what a process used between the last scan and its end.
+
+That CPU time shows under the table as **Unseen**: the whole Mac's CPU time minus what the scans
+found. Without root mode it also includes the kernel's own work, which `/bin/ps` doesn't list. Peak
+memory of a single copy is exact (macOS records it); average memory, copies at once and lifetimes
+come from the scans.
+
+- **Programs** are kept by executable path. Homebrew's version folder is left out, so `node` keeps
+  its history across upgrades. Interpreters count as one program: every Python script is `python3`.
+  **Apps** add up all executables inside the `.app` (Chrome and its helpers); **Executables** shows
+  each one.
+- **Energy** is CPU energy as macOS counts it per process (GPU work isn't included). **Power** is
+  energy ÷ running time.
+- **System processes** show CPU time and memory only, unless root mode is on (then also energy and
+  disk). A root helper installed by an older version doesn't report these: turn root mode off and on.
+- **Kept** hourly for 48 hours and daily for 90 days, in an SQLite file of a few MB. It's written once
+  an hour and when the Mac sleeps or the app quits. A scan costs about 1 ms for your processes plus
+  about 25 ms for `/bin/ps`. Turn it off or clear it in Settings.
 
 ## Root mode (optional, off by default)
 
@@ -168,12 +201,14 @@ Turning on **Settings → Show system processes** asks for your admin password a
 helper ([`Helper/helper.c`](Helper/helper.c), ~150 lines):
 
 - `/Library/PrivilegedHelperTools/local.MacMonIndicator.helper` + a LaunchDaemon plist
-- **Started on demand** by launchd when the menu asks for data. It **exits after 30 s** idle.
+- **Started on demand** by launchd when the menu (or a process history scan) asks for data. It
+  **exits after 30 s** idle.
 - **Read-only.** It answers exactly one request (`snapshot`) with per-process CPU time (and the
-  kernel's part of it), memory and disk bytes. It accepts no other commands, writes no files, and
-  only answers your user id.
-- **After an update,** a helper installed by an older version keeps working but doesn't report
-  kernel time; the process list says so. Turn the setting off and on to install the new one.
+  kernel's part of it), memory, disk bytes, start time, CPU energy, peak memory and path. It accepts
+  no other commands, writes no files, and only answers your user id.
+- **After an update,** a helper installed by an older version keeps working but may report less
+  (kernel time for the process list; energy, disk and paths for Process History); the window that
+  misses them says so. Turn the setting off and on to install the new one.
 
 Turning it off removes it (asks for the password again). Manual removal:
 
@@ -253,6 +288,9 @@ clicks sent through the window, then three window sizes, then minimize and resto
 `MACMON_INDICATOR_HISTORY_DIR=<dir>` keeps a test build away from your real history.
 `MACMON_DEBUG_RENDER=<dir>` also saves screen captures of the charts during the test.
 `--settings <dir>` renders the Settings window, light and dark.
+`--process-history <dir>` runs the process tracker on a throwaway file with 3 s scans (restarting it
+once, as a quit and relaunch would), prints the top programs and renders the Process History window.
+`MACMON_DEBUG_PROCESS_INTERVAL=<seconds>` shortens the scan interval in a test build.
 
 **Releasing a new version:**
 1. Set `VERSION` in the Makefile.

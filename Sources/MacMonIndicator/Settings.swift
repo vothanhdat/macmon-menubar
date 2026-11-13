@@ -29,6 +29,7 @@ final class Settings {
             "warnTemp": 90.0,
             "useRootHelper": false,
             "quietRestart": true,
+            "trackProcesses": true,
         ])
         showNewCharts()
     }
@@ -141,6 +142,11 @@ final class Settings {
     var useRootHelper: Bool {
         get { d.bool(forKey: "useRootHelper") }
         set { d.set(newValue, forKey: "useRootHelper"); notify() }
+    }
+    /// Keep per-program statistics (CPU, energy, memory, disk), scanned every 5 minutes.
+    var trackProcesses: Bool {
+        get { d.bool(forKey: "trackProcesses") }
+        set { d.set(newValue, forKey: "trackProcesses"); notify() }
     }
     var macmonPath: String? {
         get { d.string(forKey: "macmonPath") }

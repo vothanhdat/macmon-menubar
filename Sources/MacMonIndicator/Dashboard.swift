@@ -124,8 +124,8 @@ final class Dashboard {
     // MARK: - Menu
 
     /// Items for the status menu, top to bottom.
-    func items(status: String?, target: AnyObject, openWindow: Selector, about: Selector, settings: Selector,
-               quit: Selector) -> [NSMenuItem] {
+    func items(status: String?, target: AnyObject, openWindow: Selector, processHistory: Selector?, about: Selector,
+               settings: Selector, quit: Selector) -> [NSMenuItem] {
         let chartsItem = NSMenuItem()
         chartsItem.view = top
         let procItem = NSMenuItem()
@@ -143,9 +143,16 @@ final class Dashboard {
         s.target = target
         let q = NSMenuItem(title: "Quit MacMon Indicator", action: quit, keyEquivalent: "q")
         q.target = target
+        var more = [w]
+        if let processHistory {
+            let h = NSMenuItem(title: "Process History", action: processHistory, keyEquivalent: "")
+            h.target = target
+            more.append(h)
+        }
+        more += [a, s, q]
         // macOS 27 adds a gear to "Settings…" on its own; plain text keeps the items alike.
-        if #available(macOS 27, *) { [w, a, s, q].forEach { $0.preferredImageVisibility = .hidden } }
-        items += [w, a, s, q]
+        if #available(macOS 27, *) { more.forEach { $0.preferredImageVisibility = .hidden } }
+        items += more
         return items
     }
 

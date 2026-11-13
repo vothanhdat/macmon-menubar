@@ -6,9 +6,11 @@
 // It accepts no other commands, never writes files, and only answers the user id given
 // with --uid (plus root).
 //
-// Output: "v2\n" then one line per process:
-//   pid \t cpu_ns \t kernel_ns \t phys_footprint \t disk_bytes_read \t disk_bytes_written \t name
-// (v1, before kernel time, had no kernel_ns column; the app reads both.)
+// Output: "v3\n" then one line per process:
+//   pid \t cpu_ns \t kernel_ns \t phys_footprint \t disk_bytes_read \t disk_bytes_written \t
+//   start_us \t energy_nj \t pcore_cpu_ns \t lifetime_max_footprint \t name \t path
+// start_us is the start time in microseconds since 1970; path is empty when unknown.
+// (v2 ended after name; v1 also had no kernel_ns column. The app reads all three.)
 //
 // Debug modes (no root needed, shows only your own processes):
 //   macmon-indicator-helper --stdout
@@ -29,7 +31,7 @@
 #include <unistd.h>
 
 #define IDLE_EXIT_MS 30000
-#define LINE_MAX_LEN 256
+#define LINE_MAX_LEN (PROC_PIDPATHINFO_MAXSIZE + 512)
 
 static mach_timebase_info_data_t tb;
 
@@ -53,22 +55,44 @@ static void write_snapshot(int fd) {
     if (est <= 0) return;
     size_t cap = (size_t)est + 64;
     pid_t *pids = calloc(cap, sizeof(pid_t));
-    char *out = malloc(cap * LINE_MAX_LEN + 8);
+    // Most lines are well under 300 bytes; the buffer grows when long paths need more.
+    size_t size = cap * 300 + LINE_MAX_LEN;
+    char *out = malloc(size);
     if (!pids || !out) { free(pids); free(out); return; }
     int n = proc_listallpids(pids, (int)(cap * sizeof(pid_t)));
     size_t len = 0;
-    len += (size_t)snprintf(out, 8, "v2\n");
+    len += (size_t)snprintf(out, 8, "v3\n");
     for (int i = 0; i < n && (size_t)i < cap; i++) {
-        struct rusage_info_v4 ru;
-        if (proc_pid_rusage(pids[i], RUSAGE_INFO_V4, (rusage_info_t *)&ru) != 0) continue;
+        // V6 adds energy and P-core time to V4's fields (same layout, appended). An older macOS
+        // without V6 still gets the V4 part, with zeros for the rest.
+        struct rusage_info_v6 ru;
+        if (proc_pid_rusage(pids[i], RUSAGE_INFO_V6, (rusage_info_t *)&ru) != 0) {
+            memset(&ru, 0, sizeof(ru));
+            if (proc_pid_rusage(pids[i], RUSAGE_INFO_V4, (rusage_info_t *)&ru) != 0) continue;
+        }
         char name[2 * MAXCOMLEN + 1] = {0};
         if (proc_name(pids[i], name, sizeof(name)) <= 0) strcpy(name, "?");
         for (char *c = name; *c; c++) if (*c == '\t' || *c == '\n') *c = ' ';
-        int w = snprintf(out + len, LINE_MAX_LEN, "%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\n", pids[i],
+        char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        if (proc_pidpath(pids[i], path, sizeof(path)) <= 0) path[0] = 0;
+        for (char *c = path; *c; c++) if (*c == '\t' || *c == '\n') *c = ' ';
+        struct proc_bsdinfo bi;
+        unsigned long long start_us = 0;
+        if (proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &bi, sizeof(bi)) == sizeof(bi))
+            start_us = (unsigned long long)bi.pbi_start_tvsec * 1000000ULL + bi.pbi_start_tvusec;
+        if (len + LINE_MAX_LEN > size) {
+            char *bigger = realloc(out, size * 2);
+            if (!bigger) break;
+            out = bigger;
+            size *= 2;
+        }
+        int w = snprintf(out + len, LINE_MAX_LEN, "%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\t%s\n", pids[i],
                          (unsigned long long)to_ns(ru.ri_user_time + ru.ri_system_time),
                          (unsigned long long)to_ns(ru.ri_system_time), (unsigned long long)ru.ri_phys_footprint,
                          (unsigned long long)ru.ri_diskio_bytesread,
-                         (unsigned long long)ru.ri_diskio_byteswritten, name);
+                         (unsigned long long)ru.ri_diskio_byteswritten, start_us, (unsigned long long)ru.ri_energy_nj,
+                         (unsigned long long)to_ns(ru.ri_user_ptime + ru.ri_system_ptime),
+                         (unsigned long long)ru.ri_lifetime_max_phys_footprint, name, path);
         if (w > 0 && w < LINE_MAX_LEN) len += (size_t)w; // drop (never expected) over-long lines
     }
     write_all(fd, out, len);

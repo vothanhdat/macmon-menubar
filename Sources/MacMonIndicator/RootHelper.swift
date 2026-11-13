@@ -56,10 +56,28 @@ enum RootHelper {
         return runAsAdmin(cmd)
     }
 
-    typealias Process = (name: String, cpuNs: UInt64, kernelNs: UInt64?, mem: Double, disk: UInt64?)
+    struct Process {
+        var name: String
+        var cpuNs: UInt64
+        var kernelNs: UInt64?
+        var mem: Double
+        var diskRead: UInt64
+        var diskWritten: UInt64
+        var disk: UInt64? { diskRead &+ diskWritten }
+        // Version 3 and later:
+        var startUs: UInt64?      // start time, microseconds since 1970
+        var energyNj: UInt64?     // CPU energy used so far
+        var pcoreNs: UInt64?      // CPU time on performance cores
+        var maxMem: Double?       // highest memory footprint over its life
+        var path: String?
+    }
+
+    /// The helper version this app ships; an installed one below it lacks some columns.
+    static let currentVersion = 3
 
     /// Asks the helper for a snapshot of all processes. Returns nil if it is not reachable.
-    /// Version 1 (an older installed helper) has no kernel time.
+    /// Version 1 (an older installed helper) has no kernel time; versions 1 and 2 have no start
+    /// time, energy, P-core time, peak memory or path.
     static func snapshot() -> (version: Int, processes: [pid_t: Process])? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -91,17 +109,28 @@ enum RootHelper {
             data.append(buf, count: n)
         }
         guard let text = String(data: data, encoding: .utf8) else { return nil }
-        let version = text.hasPrefix("v2\n") ? 2 : text.hasPrefix("v1\n") ? 1 : 0
+        let version = text.hasPrefix("v3\n") ? 3 : text.hasPrefix("v2\n") ? 2 : text.hasPrefix("v1\n") ? 1 : 0
         guard version > 0 else { return nil }
+        // v3: pid \t cpu_ns \t kernel_ns \t footprint \t disk_read \t disk_write \t start_us \t energy_nj \t
+        //     pcore_ns \t max_footprint \t name \t path
         // v2: pid \t cpu_ns \t kernel_ns \t footprint \t disk_read \t disk_write \t name
         // v1: the same without kernel_ns
-        let n = version == 2 ? 7 : 6, k = version == 2 ? 1 : 0
+        let n = [1: 6, 2: 7, 3: 12][version]!, k = version >= 2 ? 1 : 0
         var out: [pid_t: Process] = [:]
         for line in text.split(separator: "\n").dropFirst() {
             let f = line.split(separator: "\t", maxSplits: n - 1, omittingEmptySubsequences: false)
             guard f.count == n, let pid = pid_t(f[0]), let cpu = UInt64(f[1]), let mem = Double(f[2 + k]),
                   let r = UInt64(f[3 + k]), let w = UInt64(f[4 + k]) else { continue }
-            out[pid] = (String(f[5 + k]), cpu, version == 2 ? UInt64(f[2]) : nil, mem, r &+ w)
+            var p = Process(name: String(f[version == 3 ? 10 : 5 + k]), cpuNs: cpu, kernelNs: k == 1 ? UInt64(f[2]) : nil,
+                            mem: mem, diskRead: r, diskWritten: w)
+            if version >= 3 {
+                p.startUs = UInt64(f[6]).flatMap { $0 > 0 ? $0 : nil }
+                p.energyNj = UInt64(f[7])
+                p.pcoreNs = UInt64(f[8])
+                p.maxMem = Double(f[9])
+                p.path = f[11].isEmpty ? nil : String(f[11])
+            }
+            out[pid] = p
         }
         return (version, out)
     }

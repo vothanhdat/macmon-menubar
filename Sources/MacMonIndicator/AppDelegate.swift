@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var processMonitor: ProcessMonitor?
     private var lastProcesses: ProcSnapshot?
     private var settingsWindow: SettingsWindowController?
+    private var historyDir: URL!
+    private var processTracker: ProcessTracker?
+    private var processHistoryWindow: ProcessHistoryWindowController?
     private var quitting = false
     private static let windowOpenKey = "dashboardWindowOpen"
 
@@ -35,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MacMonIndicator", isDirectory: true)
         history = HistoryStore(directory: dir)
+        historyDir = dir
+        updateProcessTracker()
         menu.delegate = self
         menu.autoenablesItems = false
         buildMainMenu()
@@ -57,12 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.status.update(self.latest)
             self.macmon.setInterval(self.desiredInterval())
             self.dashboardWindow?.settingsChanged()
+            self.updateProcessTracker()
         }
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             log.notice("system will sleep: stopping macmon")
             self?.macmon.stop()
             self?.history.flush(sync: true)
+            self?.processTracker?.save()
         }
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -113,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         macmon.stop()
         history.flush(sync: true)
+        processTracker?.stop()
     }
 
     // MARK: - Quiet restart
@@ -141,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         log.notice("restarting to free memory: RSS \(rss >> 20) MB, \(self.launchRSS >> 20) MB at launch")
         macmon.stop()
         history.flush(sync: true)
+        processTracker?.stop()
         let config = NSWorkspace.OpenConfiguration()
         config.createsNewApplicationInstance = true
         config.activates = false
@@ -153,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 log.error("quiet restart failed: \(String(describing: error), privacy: .public)")
                 guard let self else { return }
                 self.macmon.start(intervalMs: self.desiredInterval())
+                self.processTracker?.start()
             }
         }
     }
@@ -198,7 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboard = d
         // Only mention macmon when something is wrong.
         let problem = (macmon.state == .notFound || macmon.state == .failed) ? macmonStatusText() : nil
-        menu.items = d.items(status: problem, target: self, openWindow: #selector(openDashboardWindow), about: #selector(openAbout),
+        menu.items = d.items(status: problem, target: self, openWindow: #selector(openDashboardWindow),
+                             processHistory: processTracker != nil ? #selector(openProcessHistory) : nil, about: #selector(openAbout),
                              settings: #selector(openSettings), quit: #selector(quit))
         d.onOpenWindow = { [weak self] in self?.openDashboardWindow() }
         // The window may already be scanning processes: show its latest list right away.
@@ -259,6 +270,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.menu.removeAllItems()
             self.dashboard = nil
         }
+    }
+
+    // MARK: - Process history
+
+    /// Starts or stops the background process scans to match Settings.
+    private func updateProcessTracker() {
+        if Settings.shared.trackProcesses {
+            guard processTracker == nil else { return }
+            let t = ProcessTracker(directory: historyDir)
+            t.onScan = { [weak self] in self?.processHistoryWindow?.reload() }
+            t.start()
+            processTracker = t
+        } else if let t = processTracker {
+            t.stop()
+            processTracker = nil
+            processHistoryWindow?.close()
+        }
+    }
+
+    @objc private func openProcessHistory() {
+        menu.cancelTracking()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let tracker = self.processTracker else { return }
+            if self.processHistoryWindow == nil {
+                let wc = ProcessHistoryWindowController(tracker: tracker)
+                wc.onClose = { [weak self] in
+                    DispatchQueue.main.async { self?.processHistoryWindow = nil } // after it has finished closing
+                }
+                self.processHistoryWindow = wc
+            }
+            self.activate()
+            self.processHistoryWindow?.showWindow(nil)
+            self.processHistoryWindow?.window?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Deletes all process history (from Settings).
+    private func clearProcessHistory() {
+        // With tracking off, a tracker that never scans opens the file just to clear it.
+        let t = processTracker ?? ProcessTracker(directory: historyDir)
+        t.clear { [weak self] in self?.processHistoryWindow?.reload() }
     }
 
     // MARK: - Dashboard window
@@ -338,7 +390,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ]))
         let window = submenu("Window", [
             item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
-            item("Close", #selector(NSWindow.performClose(_:)), "w"),
+            item("Close", #selector(NSWindow.performClose(_:)), "w"), .separator(),
+            item("Process History", #selector(openProcessHistory), "", target: self),
         ])
         main.addItem(window)
         NSApp.mainMenu = main
@@ -357,6 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let wc = SettingsWindowController()
             wc.macmonStatus = { [weak self] in self?.macmonStatusText() ?? "" }
             wc.exportCSV = { [weak self] in self?.exportCSV() }
+            wc.clearProcessHistory = { [weak self] in self?.clearProcessHistory() }
             wc.onClose = { [weak self] in self?.settingsWindow = nil }
             settingsWindow = wc
         }
@@ -382,5 +436,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func activate() {
         if #available(macOS 14, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    /// Process History in the app menu works only while process history is kept.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(openProcessHistory) ? processTracker != nil : true
     }
 }
