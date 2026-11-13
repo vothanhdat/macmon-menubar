@@ -1,6 +1,6 @@
 [package]
 name = "macmon-indicator"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "MacMon Indicator in a terminal: the menu's charts and top processes, e.g. over SSH"
 license = "MIT"
