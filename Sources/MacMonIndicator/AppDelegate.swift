@@ -28,18 +28,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var onAC = true
     private var cycler: MenuCycler?
     private var sigterm: DispatchSourceSignal?
+    private var terminalServer: TerminalServer?
+    /// Terminals connected (`macmon-indicator`, see TerminalServer.swift).
+    private var terminalClients = 0
     private var restartWork: DispatchWorkItem?
     private var launchRSS: UInt64 = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        // MACMON_INDICATOR_HISTORY_DIR: for testing a build without touching the real history.
-        let dir = ProcessInfo.processInfo.environment["MACMON_INDICATOR_HISTORY_DIR"].map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MacMonIndicator", isDirectory: true)
+        let dir = AppPaths.dataDirectory
         history = HistoryStore(directory: dir)
         historyDir = dir
         updateProcessTracker()
+        startTerminalServer()
         menu.delegate = self
         menu.autoenablesItems = false
         buildMainMenu()
@@ -170,10 +171,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The dashboard window is open and can be seen (not minimized, covered or on another Space).
     private var windowVisible: Bool { dashboardWindow?.isVisible ?? false }
 
-    /// 1 s while the menu is open or the window can be seen, 10 s while the displays sleep,
-    /// otherwise the user's AC/battery choice.
+    /// Someone is looking: the menu is open, the window can be seen, or a terminal is connected.
+    private var watched: Bool { menuOpen || windowVisible || terminalClients > 0 }
+
+    /// 1 s while someone is looking (see `watched`), 10 s while the displays sleep, otherwise the
+    /// user's AC/battery choice.
     private func desiredInterval() -> Int {
-        if menuOpen || windowVisible { return 1000 }
+        if watched { return 1000 }
         if screensAsleep { return 10_000 }
         let s = Settings.shared
         return onAC ? s.intervalAC : s.intervalBattery
@@ -229,9 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    /// Process scanning runs while the menu is open or the window can be seen, and only then.
+    /// Process scanning runs while someone is looking (see `watched`), and only then.
     private func updateProcessMonitor() {
-        let needed = menuOpen || windowVisible
+        let needed = watched
         if needed, processMonitor == nil {
             let pm = ProcessMonitor()
             pm.onUpdate = { [weak self] snap in
@@ -270,6 +274,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.menu.removeAllItems()
             self.dashboard = nil
         }
+    }
+
+    // MARK: - Terminal
+
+    /// Serves `macmon-indicator` in a terminal (TerminalServer.swift).
+    private func startTerminalServer() {
+        let server = TerminalServer()
+        server.onClientsChanged = { [weak self] n in
+            guard let self, n != self.terminalClients else { return }
+            let first = self.terminalClients == 0
+            self.terminalClients = n
+            log.notice("terminals connected: \(n)")
+            self.updateProcessMonitor()
+            // A terminal wants numbers now (`--once` waits for them); back to normal 10 s after the last leaves.
+            if first || n == 0 { self.applyInterval(after: n > 0 ? 0 : 10) }
+        }
+        server.handle = { [weak self] req, reply in
+            guard let self else { return }
+            switch req.cmd {
+            case .live:
+                let problem = (self.macmon.state == .notFound || self.macmon.state == .failed) ? self.macmonStatusText() : nil
+                reply(TerminalServer.encode(TerminalServer.live(
+                    req, history: self.history, latest: self.latest, hasBattery: self.macmon.hasBattery,
+                    intervalMs: self.macmon.intervalMs, problem: problem, processes: self.lastProcesses,
+                    processHistory: self.processTracker != nil)))
+            case .history:
+                guard let tracker = self.processTracker else {
+                    reply(TerminalServer.encode(TerminalServer.history(req, summary: nil)))
+                    return
+                }
+                tracker.summary(ProcessTracker.Range(rawValue: req.range ?? 0) ?? .today) { summary in
+                    reply(TerminalServer.encode(TerminalServer.history(req, summary: summary)))
+                }
+            }
+        }
+        if server.start(path: AppPaths.socketPath(in: historyDir)) { terminalServer = server }
     }
 
     // MARK: - Process history

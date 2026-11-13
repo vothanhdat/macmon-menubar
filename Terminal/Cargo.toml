@@ -1,0 +1,21 @@
+[package]
+name = "macmon-indicator"
+version = "0.1.7"
+edition = "2021"
+description = "MacMon Indicator in a terminal: the menu's charts and top processes, e.g. over SSH"
+license = "MIT"
+publish = false
+
+[dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

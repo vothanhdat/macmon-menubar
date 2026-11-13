@@ -6,12 +6,17 @@ BUILD_DIR  := build
 APP        := $(BUILD_DIR)/$(APP_NAME).app
 PREFIX     ?= /Applications
 HELPER     := macmon-indicator-helper
+# The terminal view (Terminal/, Rust): `macmon-indicator`, bundled next to the app's binary.
+TERMINAL   := macmon-indicator
+CARGO      ?= $(shell command -v cargo || echo $(HOME)/.cargo/bin/cargo)
+# Where `make install` links `macmon-indicator` (somewhere on your PATH).
+BINDIR     ?= $(shell d=$$(brew --prefix 2>/dev/null); echo $${d:-/usr/local}/bin)
 DIST_DIR   := dist
 DIST_ZIP   := $(DIST_DIR)/MacMon-Indicator-$(VERSION).zip
 # macmon to bundle inside the app (the real file behind Homebrew's symlink). Override with MACMON=/path.
 MACMON     ?= $(shell p=$$(command -v macmon || echo /opt/homebrew/bin/macmon); [ -e "$$p" ] && realpath "$$p")
 
-.PHONY: all app run install uninstall clean check-macmon dist
+.PHONY: all app run install uninstall clean check-macmon dist link-terminal
 
 all: app
 
@@ -19,7 +24,18 @@ $(BUILD_DIR)/$(HELPER): Helper/helper.c
 	@mkdir -p $(BUILD_DIR)
 	clang -O2 -Wall -Wextra -mmacosx-version-min=13.0 -o $@ $<
 
-app: $(BUILD_DIR)/$(HELPER)
+# Without cargo (https://rustup.rs) the app still builds, without the terminal view.
+$(BUILD_DIR)/$(TERMINAL): Terminal/Cargo.toml Terminal/Cargo.lock $(wildcard Terminal/src/*.rs)
+	@mkdir -p $(BUILD_DIR)
+	@if [ -x "$(CARGO)" ]; then \
+		MACMON_INDICATOR_VERSION=$(VERSION) "$(CARGO)" build --release --locked --quiet \
+			--manifest-path Terminal/Cargo.toml --target aarch64-apple-darwin && \
+		cp Terminal/target/aarch64-apple-darwin/release/$(TERMINAL) $@; \
+	else \
+		echo "Note: cargo not found, so the terminal view ($(TERMINAL)) is not built (https://rustup.rs)"; \
+	fi
+
+app: $(BUILD_DIR)/$(HELPER) $(BUILD_DIR)/$(TERMINAL)
 	swift build -c release --arch arm64
 	@rm -rf "$(APP)"
 	@mkdir -p "$(APP)/Contents/MacOS"
@@ -31,6 +47,10 @@ app: $(BUILD_DIR)/$(HELPER)
 	@iconutil -c icns "$(BUILD_DIR)/AppIcon.iconset" -o "$(APP)/Contents/Resources/AppIcon.icns"
 	@sed -e 's/__BUNDLE_ID__/$(BUNDLE_ID)/' -e 's/__VERSION__/$(VERSION)/g' Resources/Info.plist > "$(APP)/Contents/Info.plist"
 	@codesign --force --sign - "$(APP)/Contents/MacOS/$(HELPER)"
+	@if [ -x $(BUILD_DIR)/$(TERMINAL) ]; then \
+		cp $(BUILD_DIR)/$(TERMINAL) "$(APP)/Contents/MacOS/$(TERMINAL)"; \
+		codesign --force --sign - "$(APP)/Contents/MacOS/$(TERMINAL)"; \
+	fi
 	@# Bundle macmon (MIT) so the app also works on Macs without Homebrew. Without a bundled
 	@# copy, the app looks for macmon in the usual places at runtime.
 	@if [ -x "$(MACMON)" ]; then \
@@ -60,11 +80,25 @@ install: check-macmon app
 	@rm -rf "$(PREFIX)/$(APP_NAME).app"
 	@cp -R "$(APP)" "$(PREFIX)/"
 	@echo "Installed to $(PREFIX)/$(APP_NAME).app"
+	@$(MAKE) --no-print-directory link-terminal
 	@open "$(PREFIX)/$(APP_NAME).app"
+
+# Puts `macmon-indicator` on your PATH: a link to the copy inside the installed app.
+link-terminal:
+	@t="$(PREFIX)/$(APP_NAME).app/Contents/MacOS/$(TERMINAL)"; l="$(BINDIR)/$(TERMINAL)"; \
+	if [ ! -x "$$t" ]; then exit 0; fi; \
+	if [ -e "$$l" ] && [ ! -L "$$l" ]; then \
+		echo "Not linking $$l: a file is already there"; \
+	elif [ -w "$(BINDIR)" ]; then \
+		ln -sf "$$t" "$$l" && echo "Linked $$l: run $(TERMINAL) in a terminal (also over SSH)"; \
+	else \
+		echo "For the terminal view, link it onto your PATH:  sudo ln -sf \"$$t\" \"$$l\""; \
+	fi
 
 # Zip for a GitHub Release: unzip, move to /Applications, open (macmon included).
 dist: app
 	@[ -x "$(APP)/Contents/MacOS/macmon" ] || { echo "dist needs macmon to bundle: brew install macmon"; exit 1; }
+	@[ -x "$(APP)/Contents/MacOS/$(TERMINAL)" ] || { echo "dist needs cargo for the terminal view: https://rustup.rs"; exit 1; }
 	@codesign --verify --deep --strict "$(APP)"
 	@mkdir -p $(DIST_DIR)
 	@# No extended attributes: they become ._ files, which break the signature when unzipped with `unzip`.
@@ -75,7 +109,8 @@ dist: app
 uninstall:
 	@pkill -x $(EXEC) 2>/dev/null || true
 	@rm -rf "$(PREFIX)/$(APP_NAME).app"
+	@l="$(BINDIR)/$(TERMINAL)"; if [ -L "$$l" ] && readlink "$$l" | grep -q "/$(APP_NAME).app/"; then rm -f "$$l"; echo "Removed $$l"; fi
 	@echo "Removed $(PREFIX)/$(APP_NAME).app (history stays in ~/Library/Application Support/MacMonIndicator)"
 
 clean:
-	rm -rf $(BUILD_DIR) $(DIST_DIR) .build
+	rm -rf $(BUILD_DIR) $(DIST_DIR) .build Terminal/target

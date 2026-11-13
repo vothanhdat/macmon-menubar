@@ -20,7 +20,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     private static let rangeKey = "processHistoryRange"
     private static let groupKey = "processHistoryByExecutable"
 
-    private struct Row {
+    struct Row {
         let name: String
         let path: String
         let s: ProcStats
@@ -34,7 +34,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         var diskWritten: Double { s.detail ? s.diskWritten : -1 }
     }
 
-    private struct Column {
+    struct Column {
         let id: String
         let title: String
         let width: CGFloat
@@ -43,7 +43,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         let value: (Row) -> Double
     }
 
-    private static let columns: [Column] = [
+    static let columns: [Column] = [
         Column(id: "name", title: "Name", width: 210, tip: "The app (all of its processes together) or the executable. Double-click to show it in Finder.",
                text: { $0.name }, value: { _ in 0 }),
         Column(id: "running", title: "Running", width: 72, tip: "How long at least one copy was running (while the Mac was awake)",
@@ -180,30 +180,39 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
 
     private func rebuildRows() {
         let filter = search.stringValue.trimmingCharacters(in: .whitespaces)
-        rows = summary.programs.compactMap { p in
-            // Apps: app bundles plus executables outside any app. Executables: every executable.
-            let show = byExecutable ? !ProcKey.isApp(p.path) : (ProcKey.isApp(p.path) || ProcKey.app(of: p.path) == nil)
-            guard show else { return nil }
-            let name = ProcKey.name(p.path)
-            guard filter.isEmpty || name.localizedCaseInsensitiveContains(filter) || p.path.localizedCaseInsensitiveContains(filter) else { return nil }
-            return Row(name: name, path: p.path, s: p.stats)
-        }
+        rows = Self.rows(summary, byExecutable: byExecutable, filter: filter)
         sortRows()
         table.reloadData()
         updateFooter()
     }
 
     private func sortRows() {
-        guard let d = table.sortDescriptors.first, let key = d.key,
-              let col = Self.columns.first(where: { $0.id == key }) else { return }
+        guard let d = table.sortDescriptors.first, let key = d.key else { return }
+        Self.sort(&rows, by: key, ascending: d.ascending)
+    }
+
+    /// The rows for a summary. Apps: app bundles plus executables outside any app. Executables:
+    /// every executable. Also used by the terminal view.
+    static func rows(_ summary: ProcessTracker.Summary, byExecutable: Bool, filter: String = "") -> [Row] {
+        summary.programs.compactMap { p in
+            let show = byExecutable ? !ProcKey.isApp(p.path) : (ProcKey.isApp(p.path) || ProcKey.app(of: p.path) == nil)
+            guard show else { return nil }
+            let name = ProcKey.name(p.path)
+            guard filter.isEmpty || name.localizedCaseInsensitiveContains(filter) || p.path.localizedCaseInsensitiveContains(filter) else { return nil }
+            return Row(name: name, path: p.path, s: p.stats)
+        }
+    }
+
+    /// Sorts by a column id; ties (often zeros) fall back to CPU time, then name.
+    static func sort(_ rows: inout [Row], by key: String, ascending: Bool) {
+        guard let col = columns.first(where: { $0.id == key }) else { return }
         if key == "name" {
-            rows.sort { d.ascending ? $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                                    : $0.name.localizedStandardCompare($1.name) == .orderedDescending }
+            rows.sort { ascending ? $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                                  : $0.name.localizedStandardCompare($1.name) == .orderedDescending }
         } else {
-            // Ties (often zeros) fall back to CPU time, then name.
             rows.sort { a, b in
                 let x = col.value(a), y = col.value(b)
-                if x != y { return d.ascending ? x < y : x > y }
+                if x != y { return ascending ? x < y : x > y }
                 if a.s.cpu != b.s.cpu { return a.s.cpu > b.s.cpu }
                 return a.name.localizedStandardCompare(b.name) == .orderedAscending
             }
@@ -211,6 +220,13 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func updateFooter() {
+        footer.stringValue = Self.footer(summary, range: range, empty: rows.isEmpty && summary.programs.isEmpty && loaded)
+            .joined(separator: "\n")
+    }
+
+    /// Lines under the table: when the last scan ran, what the numbers can't include. `empty`:
+    /// loaded, and nothing recorded yet. Also used by the terminal view.
+    static func footer(_ summary: ProcessTracker.Summary, range: ProcessTracker.Range, empty: Bool) -> [String] {
         var parts: [String] = []
         let time = DateFormatter()
         time.dateFormat = "HH:mm"
@@ -228,7 +244,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             }
             parts.append(line)
         }
-        if rows.isEmpty && summary.programs.isEmpty && loaded {
+        if empty {
             parts.append("Collecting: numbers appear after the second scan.")
         }
         let partial = summary.programs.contains { !$0.stats.detail }
@@ -242,7 +258,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         default:
             break
         }
-        footer.stringValue = parts.joined(separator: "\n")
+        return parts
     }
 
     // MARK: - Actions

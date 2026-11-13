@@ -29,9 +29,8 @@ final class ProcessListView: NSView {
     /// Kernel is the part of CPU spent in the kernel on the process's behalf (system calls, page
     /// faults): the per-process sign of heavy file work, since macOS doesn't count disk operations
     /// per process.
-    private let columns: [(sort: Sort, title: String, width: CGFloat)] = [
-        (.cpu, "CPU", 46), (.time, "CPU time", 62), (.ram, "RAM", 50), (.disk, "Disk", 58), (.kernel, "Kernel", 54),
-    ]
+    private let columns: [(sort: Sort, title: String, width: CGFloat)] = zip(ProcessListView.sortOrder, [46, 62, 50, 58, 54] as [CGFloat])
+        .map { ($0, ProcessListView.title(of: $0), $1) }
     private let font = NSFont.systemFont(ofSize: 11)
     private let numFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
     private let headFont = NSFont.systemFont(ofSize: 11, weight: .medium)
@@ -47,7 +46,7 @@ final class ProcessListView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func key(_ r: ProcRow, _ s: Sort) -> Double {
+    static func key(_ r: ProcRow, _ s: Sort) -> Double {
         switch s {
         case .cpu: return r.cpu ?? 0
         case .ram: return r.mem
@@ -57,32 +56,72 @@ final class ProcessListView: NSView {
         }
     }
 
-    private func recompute() {
-        guard let rows = snapshot?.rows else { picked = []; needsDisplay = true; return }
+    /// Column order, left to right (the mixed list takes the top few by each, in this order).
+    static let sortOrder: [Sort] = [.cpu, .time, .ram, .disk, .kernel]
+
+    /// The rows to show: the top `count` by `sort`, or with no sort the top few by each column,
+    /// each with the column it was picked for. Also used by the terminal view.
+    static func pick(_ rows: [ProcRow], sort: Sort?, count: Int) -> [(row: ProcRow, reason: Sort)] {
         if let s = sort {
-            picked = rows.sorted { key($0, s) > key($1, s) }.prefix(rowCount).map { ($0, s) }
-        } else {
-            var out: [(ProcRow, Sort)] = []
-            var seen = Set<pid_t>()
-            // The top few by each column, left to right; a process counts for the first column it tops.
-            let each = max(2, rowCount / columns.count)
-            for s in columns.map(\.sort) {
-                var n = 0
-                for r in rows.sorted(by: { key($0, s) > key($1, s) }) where !seen.contains(r.pid) {
-                    if s == .disk && (r.disk ?? 0) < Self.minDiskBps { break } // ignore idle disk users
-                    if s == .kernel && r.kernel == nil { break }            // not known yet
-                    out.append((r, s)); seen.insert(r.pid); n += 1
-                    if n == each { break }
-                }
-            }
-            if out.count < rowCount { // e.g. nothing using disk: fill with the next CPU users
-                for r in rows.sorted(by: { key($0, .cpu) > key($1, .cpu) }) where !seen.contains(r.pid) {
-                    out.append((r, .cpu)); seen.insert(r.pid)
-                    if out.count == rowCount { break }
-                }
-            }
-            picked = out
+            return rows.sorted { key($0, s) > key($1, s) }.prefix(count).map { ($0, s) }
         }
+        var out: [(row: ProcRow, reason: Sort)] = []
+        var seen = Set<pid_t>()
+        // The top few by each column, left to right; a process counts for the first column it tops.
+        let each = max(2, count / sortOrder.count)
+        for s in sortOrder {
+            var n = 0
+            for r in rows.sorted(by: { key($0, s) > key($1, s) }) where !seen.contains(r.pid) {
+                if s == .disk && (r.disk ?? 0) < minDiskBps { break } // ignore idle disk users
+                if s == .kernel && r.kernel == nil { break }            // not known yet
+                out.append((r, s)); seen.insert(r.pid); n += 1
+                if n == each { break }
+            }
+        }
+        if out.count < count { // e.g. nothing using disk: fill with the next CPU users
+            for r in rows.sorted(by: { key($0, .cpu) > key($1, .cpu) }) where !seen.contains(r.pid) {
+                out.append((r, .cpu)); seen.insert(r.pid)
+                if out.count == count { break }
+            }
+        }
+        return out
+    }
+
+    static func title(of s: Sort) -> String {
+        switch s {
+        case .cpu: return "CPU"
+        case .time: return "CPU time"
+        case .ram: return "RAM"
+        case .disk: return "Disk"
+        case .kernel: return "Kernel"
+        }
+    }
+
+    /// A cell's text.
+    static func text(_ r: ProcRow, _ s: Sort) -> String {
+        let pct = { (v: Double?) in v.map { $0 < 9.95 ? String(format: "%.1f%%", $0) : String(format: "%.0f%%", $0) } ?? Fmt.dash }
+        switch s {
+        case .cpu: return pct(r.cpu)
+        case .time: return Fmt.duration(r.cpuTime)
+        case .ram: return Fmt.bytes(r.mem)
+        case .disk: return Fmt.rate(r.disk)
+        case .kernel: return pct(r.kernel)
+        }
+    }
+
+    /// The line under the table: why some numbers are missing, or "" for none.
+    static func note(_ snapshot: ProcSnapshot?) -> String {
+        guard let snap = snapshot else { return "Collecting…" }
+        if snap.helperFailed { return "Root helper not reachable. Showing your processes only." }
+        if snap.helperOutdated { return "Root helper is out of date: turn system processes off and on in Settings for kernel time." }
+        if let hidden = snap.hiddenDiskBps, hidden >= 50_000 {
+            return "System processes: \(Fmt.rate(hidden)) disk (turn on root mode to see which)"
+        }
+        return ""
+    }
+
+    private func recompute() {
+        picked = snapshot.map { Self.pick($0.rows, sort: sort, count: rowCount) } ?? []
         needsDisplay = true
     }
 
@@ -125,34 +164,14 @@ final class ProcessListView: NSView {
             let r = item.row
             (r.name as NSString).draw(in: NSRect(x: inset, y: y, width: nameW, height: Self.rowH),
                                       withAttributes: [.font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: para])
-            let pct = { (v: Double?) in v.map { $0 < 9.95 ? String(format: "%.1f%%", $0) : String(format: "%.0f%%", $0) } ?? Fmt.dash }
             for (c, col) in columns.enumerated() {
-                let text: String
-                switch col.sort {
-                case .cpu: text = pct(r.cpu)
-                case .time: text = Fmt.duration(r.cpuTime)
-                case .ram: text = Fmt.bytes(r.mem)
-                case .disk: text = Fmt.rate(r.disk)
-                case .kernel: text = pct(r.kernel)
-                }
                 let strong = item.reason == col.sort
-                drawRight(text, x: columnX(c), w: col.width, y: y + 1,
+                drawRight(Self.text(r, col.sort), x: columnX(c), w: col.width, y: y + 1,
                           attrs: [.font: numFont, .foregroundColor: strong ? NSColor.labelColor : NSColor.tertiaryLabelColor])
             }
         }
 
-        var note = ""
-        if let snap = snapshot {
-            if snap.helperFailed {
-                note = "Root helper not reachable. Showing your processes only."
-            } else if snap.helperOutdated {
-                note = "Root helper is out of date: turn system processes off and on in Settings for kernel time."
-            } else if let hidden = snap.hiddenDiskBps, hidden >= 50_000 {
-                note = "System processes: \(Fmt.rate(hidden)) disk (turn on root mode to see which)"
-            }
-        } else {
-            note = "Collecting…"
-        }
+        let note = Self.note(snapshot)
         if !note.isEmpty {
             (note as NSString).draw(in: NSRect(x: inset, y: Self.headerH + Self.rowH * CGFloat(rowCount) + 2,
                                                width: bounds.width - inset * 2, height: Self.noteH),

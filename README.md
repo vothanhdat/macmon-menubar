@@ -36,6 +36,8 @@ _Screenshots use demo history and demo process names._
   CPU energy and average power, average and peak memory, disk read and written. Programs are kept by
   path, not pid, and an app's helper processes add up under the app (or see each executable). Pick
   Today, 24 hours, 7, 30 or 90 days; click a column to sort. See [Process history](#process-history).
+- **In a terminal, also over SSH**: `macmon-indicator` shows the same charts, top processes and
+  process history in a terminal, from the app running on that Mac. See [In a terminal](#in-a-terminal-also-over-ssh).
 - **Optional root mode** to see disk use of system processes (Spotlight, Time Machine, …).
 - Starts at login, no Dock icon (unless the dashboard window is open), stays out of the way.
 
@@ -72,14 +74,16 @@ is no Gatekeeper prompt.
 ### Build from source
 
 Needs Xcode Command Line Tools (`xcode-select --install`; full Xcode is not needed) and
-`brew install macmon`, which gets bundled into the app.
+`brew install macmon`, which gets bundled into the app. The terminal view (`macmon-indicator`) also
+needs [Rust](https://rustup.rs); without it the app builds without the terminal view.
 
 ```bash
 git clone https://github.com/vothanhdat/macmon-menubar.git && cd macmon-menubar
 make install
 ```
 
-This builds the app and copies it to `/Applications`. Because you build it yourself, macOS does not
+This builds the app and copies it to `/Applications`, and links `macmon-indicator` into Homebrew's
+`bin` folder (or prints the `ln` command when it can't). Because you build it yourself, macOS does not
 show the "unidentified developer" warning. Then open **Settings… → Launch at login**.
 
 Other commands: `make app` (build only, into `build/`), `make run`, `make uninstall`, `make clean`,
@@ -91,6 +95,49 @@ Other commands: `make app` (build only, into `build/`), `make run`, `make uninst
 - **Settings**: menu bar slots, icons, one or two lines, text size, spacing, edge padding and opacity
   (the menu bar updates live while you drag), menu charts (which, order, columns, value position, height), update interval (on power / on battery), warning limits, launch at
   login, free memory while the display sleeps, root mode, process history (on or off, clear), CSV export.
+
+## In a terminal (also over SSH)
+
+`macmon-indicator` shows the menu's charts, top processes and process history in a terminal. It
+gets them from MacMon Indicator running on the same Mac, so the numbers match the menu. From another
+machine, SSH in and run it:
+
+```bash
+ssh mac-mini
+macmon-indicator
+```
+
+- **Live view**: the charts you chose in Settings over 1m to 30d (`1`–`6` or `←` `→`), and the top
+  processes (`s` / `S` cycles the sort column, as clicking a column header does in the menu). Each
+  chart is a box with its title, details and value in the top border, in the number of columns set
+  in Settings (more when the terminal is too short for them). The bars are braille dots, as btop draws its graphs: two time
+  buckets per character, four dots high per row. The average is in the chart's color, the peak in
+  muted dots above it. On CPU, GPU, RAM and Temp the color follows the height, shading into red
+  toward your warning limit. The charts grow taller in a taller terminal. `h` (or Tab) switches to
+  process history, `q` quits.
+- **Process history**: `1`–`5` or `←` `→` for the range, `e` apps or executables, `s` / `S` sort
+  column, `r` reverse, `/` filter (as you type; Enter keeps it, Esc clears it), `↑` `↓` PgUp PgDn to
+  move (the selected program's path shows at the bottom), Esc back.
+- **Once**: `macmon-indicator --once` prints the readings and top processes and exits (also when the
+  output isn't a terminal). Add `--history` for process history, `--range 1h` (or `today`, `7d`, …)
+  for the range, or use `--json` for the app's full reply, for scripts. `--help` lists everything.
+- **Without logging in to a shell**: a command run by `ssh` doesn't load your shell profile, so
+  Homebrew's folder isn't on its PATH. Give the full path:
+  `ssh mac-mini /opt/homebrew/bin/macmon-indicator --once`, or `ssh -t mac-mini /opt/homebrew/bin/macmon-indicator`
+  for the live view.
+- **Colors**: 24-bit where the terminal says it has them (`COLORTERM=truecolor`, which SSH usually
+  doesn't pass on), otherwise the 256-color palette, which every terminal has. `NO_COLOR=1` turns them off.
+
+The app must be running on that Mac, so someone must be logged in to its desktop (the app starts at
+login). When it isn't running, `macmon-indicator` says so and retries every second; while you're
+logged in to the desktop, `open -a "MacMon Indicator"` starts it over SSH. While a terminal is
+connected, the app samples every second and scans processes, as it does while the menu is open (see
+[Resource use](#resource-use)), also when the Mac's display sleeps. The two talk over a Unix socket,
+`~/Library/Application Support/MacMonIndicator/terminal.sock`, that only your user can open. The
+terminal view is a small Rust program ([ratatui](https://ratatui.rs)) inside the app,
+`Contents/MacOS/macmon-indicator`; the Homebrew cask and `make install` put it on your PATH. With a
+downloaded copy, link it yourself:
+`ln -s "/Applications/MacMon Indicator.app/Contents/MacOS/macmon-indicator" /opt/homebrew/bin/`.
 
 ## Resource use
 
@@ -133,10 +180,10 @@ How it stays small:
   itself) that is replaced only when the text or color changes. **Ignore small changes** (on by
   default) keeps a number until it moves by a noticeable step or is a minute old. Warnings always
   show immediately, and the menu always shows exact values. This cut the app's CPU from 0.42% to 0.18%.
-- **Adaptive interval:** 1 s while the menu is open or the window can be seen, your setting on power or battery,
+- **Adaptive interval:** 1 s while the menu is open, the window can be seen or a terminal view is connected, your setting on power or battery,
   10 s while the displays sleep, stopped during system sleep. Changes are debounced: sweeping the
   mouse along the menu bar opens and closes menus, and that doesn't restart macmon.
-- **Process scanning runs only while the menu is open or the window can be seen.**
+- **Process scanning runs only while the menu is open, the window can be seen or a terminal view is connected.**
 - **Space-efficient malloc.** The app's Info.plist sets `MallocSpaceEfficient=1`, so freed memory
   goes back to macOS instead of staying cached in the app: about 3 MB less at launch and up to 18 MB
   less after the menu has been shown.
@@ -155,9 +202,11 @@ macmon pipe -i <ms> ──JSON lines──▶ MacMonIndicator.app
                                      ├─ status item (two-line grid)
                                      ├─ history: 6 round-robin tiers in history.bin
                                      │    1m @1s · 5m @5s · 1h @10s · 24h @4min · 7d @30min · 30d @2h  (avg + max)
-                                     └─ menu (NSMenu; built on open, freed on close)
-                                          └─ process monitor: libproc (your processes) + /bin/ps (others)
-                                                              or the root helper (everything)
+                                     ├─ menu (NSMenu; built on open, freed on close)
+                                     │    └─ process monitor: libproc (your processes) + /bin/ps (others)
+                                     │                        or the root helper (everything)
+                                     └─ terminal.sock (JSON lines) ◀── macmon-indicator in a terminal
+                                                                       (Terminal/, Rust + ratatui)
 ```
 
 History lives in `~/Library/Application Support/MacMonIndicator/history.bin`, process history in
@@ -292,12 +341,21 @@ clicks sent through the window, then three window sizes, then minimize and resto
 once, as a quit and relaunch would), prints the top programs and renders the Process History window.
 `MACMON_DEBUG_PROCESS_INTERVAL=<seconds>` shortens the scan interval in a test build.
 
+The terminal view finds a test build the same way: run both with the same
+`MACMON_INDICATOR_HISTORY_DIR`, e.g. `MACMON_INDICATOR_HISTORY_DIR=/tmp/mmi cargo run --manifest-path Terminal/Cargo.toml`.
+(When that folder's path is too long for a socket address, over about 100 characters, both use the
+per-user temporary folder instead.) Its messages are in `Terminal/src/proto.rs` and
+`Sources/MacMonIndicator/TerminalServer.swift`; change them together and bump `version` in both
+when an older terminal view couldn't read the new replies.
+
 **Releasing a new version:**
-1. Set `VERSION` in the Makefile.
+1. Set `VERSION` in the Makefile, and `version` in `Terminal/Cargo.toml`.
 2. Run `make dist`.
 3. Publish the zip as a GitHub Release tagged `v<version>`.
 4. In [vothanhdat/homebrew-tap](https://github.com/vothanhdat/homebrew-tap), update `version` and
-   `sha256` in `Casks/macmon-indicator.rb` (`make dist` prints the checksum).
+   `sha256` in `Casks/macmon-indicator.rb` (`make dist` prints the checksum). The cask puts the
+   terminal view on the PATH with
+   `binary "#{appdir}/MacMon Indicator.app/Contents/MacOS/macmon-indicator"`.
 
 ## License
 

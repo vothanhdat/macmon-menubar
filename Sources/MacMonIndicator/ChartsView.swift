@@ -720,6 +720,13 @@ final class ChartsView: NSView {
     }
 
     private func range(_ scale: Scale, _ avgs: [Float], _ peaks: [Float]) -> (lo: Float, hi: Float, dataMin: Float, dataMax: Float) {
+        Self.range(scale, avgs, peaks, latest: latest, fit: fitScale)
+    }
+
+    /// Visible value range for `scale` over a window's averages and peaks; `fit` is "Zoom Temp and
+    /// RAM". Also used by the terminal view.
+    static func range(_ scale: Scale, _ avgs: [Float], _ peaks: [Float], latest: Sample?,
+                      fit: Bool) -> (lo: Float, hi: Float, dataMin: Float, dataMax: Float) {
         let maxAbs = { (b: [Float]) in b.lazy.filter(\.isFinite).map { abs($0) }.max() ?? 0 }
         switch scale {
         case .fixed(let v):
@@ -730,8 +737,8 @@ final class ChartsView: NSView {
             return (0, (latest?.fanMax).flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 6000, .nan, .nan)
         case .auto(let minV):
             return (0, Self.roundUp(max(minV, maxAbs(peaks) * 1.05)), .nan, .nan)
-        case .smart(_, let otherwise) where !fitScale:
-            return range(otherwise, avgs, peaks)
+        case .smart(_, let otherwise) where !fit:
+            return range(otherwise, avgs, peaks, latest: latest, fit: fit)
         case .smart(let minSpan, _):
             let lows = avgs.filter(\.isFinite), highs = peaks.filter(\.isFinite)
             guard let dMin = lows.min(), let dMax = highs.max() ?? lows.max() else { return (0, 1, .nan, .nan) }
@@ -771,7 +778,7 @@ final class ChartsView: NSView {
 
     /// How far below the warning limit bars start turning red, as a share of the chart's full
     /// (unzoomed) scale: 25 points for percentages and temperatures, a quarter of total RAM.
-    private static let warnBand: Float = 0.25
+    static let warnBand: Float = 0.25
 
     /// Where the red blend starts and ends for a row, or nil without a limit.
     private func warnRange(_ row: Row, limit: Float?) -> (start: Float, limit: Float)? {
