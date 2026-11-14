@@ -4,6 +4,8 @@ A tiny macOS menu bar monitor for Apple Silicon: CPU, GPU, RAM, power, battery, 
 fans and disk, with up to 30 days of history and a top-processes list. Sensor data comes from
 [macmon](https://github.com/vladkens/macmon) (sudoless). This project is an unofficial frontend for it.
 
+**Website:** [vothanhdat.github.io/macmon-menubar](https://vothanhdat.github.io/macmon-menubar/)
+
 | Menu bar | Warning | Menu |
 |---|---|---|
 | ![menu bar](docs/menubar-light.png) | ![warning](docs/menubar-warning-light.png) | ![menu](docs/dropdown-dark.png) |
@@ -357,6 +359,9 @@ when an older terminal view couldn't read the new replies. `Tests/protocol/` hol
 request of each kind, and both sides are tested against those files, so a field changed on one side
 only fails `make test`. After changing a reply on purpose, write the files again with
 `MMI_UPDATE_FIXTURES=1 swift test`, then make the Rust side read them.
+
+The website is `docs/index.html`, one file with no build step, served by GitHub Pages from the
+`docs/` folder on `master`. To look at it locally: `python3 -m http.server --directory docs`.
 
 **Releasing a new version:**
 1. Set `VERSION` in the Makefile, and `version` in `Terminal/Cargo.toml`.

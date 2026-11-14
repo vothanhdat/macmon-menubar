@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MacMon Indicator: a menu bar monitor for Apple Silicon</title>
+<meta name="description" content="A tiny macOS menu bar monitor for Apple Silicon: CPU, GPU, RAM, power, temperature and disk, with 30 days of history, per-program history, and a terminal view that works over SSH.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:title" content="MacMon Indicator">
+<meta property="og:description" content="A tiny macOS menu bar monitor for Apple Silicon, with 30 days of history, per-program history, and a terminal view over SSH.">
+<meta property="og:url" content="https://vothanhdat.github.io/macmon-menubar/">
+<meta property="og:image" content="https://vothanhdat.github.io/macmon-menubar/dropdown-dark.png">
+<link rel="icon" type="image/png" href="icon.png">
+<style>
+  :root {
+    --bg: #f6f6f4;
+    --bg-2: #ffffff;
+    --ink: #1b1c1e;
+    --ink-2: #55585e;
+    --ink-3: #868a91;
+    --line: #dfe0dc;
+    --accent: #4a4fd6;
+    --accent-ink: #ffffff;
+    --code-bg: #1d1e22;
+    --code-ink: #e9eaee;
+    --code-dim: #8d919b;
+    --bar: #ededed;
+    --bar-ink: #1b1c1e;
+    --menu: #f5f5f5;
+    --shadow: 0 30px 60px -20px rgba(20, 22, 40, .28), 0 0 0 1px rgba(0, 0, 0, .08);
+    --c-cpu: #5e5ce6;
+    --c-ram: #2fa84f;
+    --c-power: #e8862b;
+    --c-disk: #1a8fe3;
+    --c-warn: #e5484d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #131416;
+      --bg-2: #1b1c20;
+      --ink: #f1f1f3;
+      --ink-2: #b1b4bb;
+      --ink-3: #7f838b;
+      --line: #2b2d33;
+      --accent: #8a8cff;
+      --accent-ink: #101114;
+      --code-bg: #0c0d0f;
+      --bar: #292929;
+      --bar-ink: #f1f1f3;
+      --menu: #333333;
+      --shadow: 0 30px 70px -20px rgba(0, 0, 0, .7), 0 0 0 1px rgba(255, 255, 255, .09);
+      --c-cpu: #8a8cff;
+      --c-ram: #46c768;
+      --c-power: #f39a45;
+      --c-disk: #3aa8f5;
+      --c-warn: #ff6369;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 17px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  img { max-width: 100%; height: auto; display: block; }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  code, pre, kbd { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  code { font-size: .9em; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  @media (max-width: 520px) { .wrap { padding: 0 16px; } }
+
+  /* Top bar */
+  header.top { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; color: inherit; text-decoration: none; letter-spacing: -.01em; }
+  .brand img { width: 30px; height: 30px; }
+  nav.links { display: flex; gap: 22px; font-size: 15px; }
+  nav.links a { color: var(--ink-2); text-decoration: none; }
+  nav.links a:hover { color: var(--ink); }
+  @media (max-width: 520px) { nav.links a.opt { display: none; } }
+
+  /* Hero */
+  .hero { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr); gap: 56px; align-items: center; padding: 48px 0 88px; }
+  @media (max-width: 880px) { .hero { grid-template-columns: minmax(0, 1fr); gap: 44px; padding: 28px 0 64px; } }
+  .eyebrow { font-size: 14px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 14px; }
+  h1 { font-size: clamp(38px, 5.6vw, 60px); line-height: 1.04; letter-spacing: -.035em; font-weight: 720; margin: 0 0 20px; text-wrap: balance; }
+  .lede { font-size: clamp(18px, 2vw, 20px); color: var(--ink-2); margin: 0 0 30px; max-width: 34em; text-wrap: pretty; }
+  .lede b { color: var(--ink); font-weight: 600; }
+
+  .cmd { display: flex; align-items: stretch; background: var(--code-bg); color: var(--code-ink); border-radius: 12px; overflow: hidden; max-width: 560px; }
+  .cmd pre { margin: 0; padding: 14px 16px; font-size: 13.5px; overflow-x: auto; flex: 1; white-space: pre; }
+  .cmd pre::before { content: "$ "; color: var(--code-dim); }
+  .cmd button {
+    border: 0; border-left: 1px solid rgba(255, 255, 255, .12); background: transparent; color: var(--code-ink);
+    font: inherit; font-size: 14px; padding: 0 14px; cursor: pointer; min-width: 70px;
+  }
+  .cmd button:hover { background: rgba(255, 255, 255, .08); }
+  .cmd button:focus-visible, .btn:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: 10px; font-weight: 600; font-size: 15.5px;
+    text-decoration: none; border: 1px solid var(--line); color: var(--ink); background: var(--bg-2);
+  }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .req { margin: 18px 0 0; font-size: 14.5px; color: var(--ink-3); }
+
+  /* Hero picture: a menu bar with the menu open under it */
+  .screen { justify-self: center; width: 100%; max-width: 440px; }
+  .menubar {
+    display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 34px; padding: 0 14px;
+    background: var(--bar); color: var(--bar-ink); border-radius: 10px 10px 0 0; font-size: 13.5px; font-weight: 500;
+    box-shadow: 0 0 0 1px rgba(128, 128, 128, .18);
+  }
+  .menubar img { width: 94px; height: 34px; }
+  .menubar .dots { margin-right: auto; display: flex; gap: 14px; color: var(--ink-3); font-weight: 600; }
+  .menu { margin: 8px 0 0 auto; width: 100%; background: var(--menu); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+  .menu img { width: 100%; }
+  .caption { font-size: 13px; color: var(--ink-3); text-align: center; margin: 14px 0 0; }
+
+  /* Sections */
+  section { padding: 76px 0; border-top: 1px solid var(--line); }
+  @media (max-width: 880px) { section { padding: 56px 0; } }
+  h2 { font-size: clamp(28px, 3.6vw, 38px); line-height: 1.12; letter-spacing: -.028em; font-weight: 700; margin: 0 0 14px; text-wrap: balance; }
+  .sub { color: var(--ink-2); font-size: 18px; max-width: 40em; margin: 0 0 40px; text-wrap: pretty; }
+  h3 { font-size: 19px; letter-spacing: -.012em; margin: 0 0 8px; font-weight: 650; }
+  p { margin: 0 0 14px; }
+
+  .three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  @media (max-width: 880px) { .three { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: var(--bg-2); border: 1px solid var(--line); border-radius: 16px; padding: 26px; }
+  .card p { color: var(--ink-2); margin: 0; font-size: 16px; }
+  .tag { display: inline-block; width: 28px; height: 5px; border-radius: 3px; margin-bottom: 18px; }
+
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; align-items: center; }
+  .split + .split { margin-top: 84px; }
+  @media (max-width: 880px) { .split { grid-template-columns: minmax(0, 1fr); gap: 28px; } .split + .split { margin-top: 60px; } .split .pic { order: 2; } }
+  .split p { color: var(--ink-2); }
+  .split ul { margin: 0; padding-left: 1.15em; color: var(--ink-2); }
+  .split li { margin: 6px 0; }
+  .split li::marker { color: var(--ink-3); }
+  .split b { color: var(--ink); font-weight: 600; }
+
+  .bars { display: grid; gap: 18px; justify-items: start; justify-self: center; }
+  .bars figure { margin: 0; display: flex; align-items: center; gap: 16px; }
+  .bars .strip { background: var(--bar); border-radius: 11px; padding: 0 18px; box-shadow: 0 0 0 1px rgba(128, 128, 128, .18); }
+  .bars img { width: 141px; height: 51px; }
+  .bars figcaption { font-size: 15px; color: var(--ink-2); }
+
+  .kept .eyebrow { font-size: 12.5px; margin-bottom: 12px; }
+  .split ul.chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  .split .chips li { margin: 0; font-size: 14.5px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 5px 11px; background: var(--bg); }
+
+  .term { background: var(--code-bg); color: var(--code-ink); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+  .term .title { display: flex; gap: 7px; padding: 12px 14px; border-bottom: 1px solid rgba(255, 255, 255, .08); }
+  .term .title i { width: 11px; height: 11px; border-radius: 50%; background: #3b3d44; }
+  .term pre { margin: 0; padding: 18px 18px 20px; font-size: 14px; line-height: 1.7; overflow-x: auto; }
+  .term .p { color: var(--code-dim); }
+  .term .c { color: var(--code-dim); }
+
+  table.use { border-collapse: collapse; width: 100%; font-size: 16px; font-variant-numeric: tabular-nums; }
+  table.use th, table.use td { text-align: left; padding: 12px 0; border-bottom: 1px solid var(--line); }
+  table.use th { font-size: 13.5px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; }
+  table.use td + td, table.use th + th { text-align: right; padding-left: 16px; }
+  table.use tr:last-child td { border-bottom: 0; font-weight: 650; }
+  .fine { font-size: 14px; color: var(--ink-3); margin-top: 14px; }
+
+  /* Install */
+  .install { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  @media (max-width: 880px) { .install { grid-template-columns: minmax(0, 1fr); } }
+  .install .card { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .install .card p { font-size: 15.5px; }
+  .install pre { margin: auto 0 0; background: var(--code-bg); color: var(--code-ink); border-radius: 10px; padding: 12px 14px; font-size: 12.5px; overflow-x: auto; line-height: 1.6; }
+  .pill { align-self: flex-start; font-size: 12.5px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--ink-3); border: 1px solid var(--line); border-radius: 99px; padding: 2px 10px; }
+
+  footer { border-top: 1px solid var(--line); padding: 36px 0 56px; color: var(--ink-3); font-size: 14.5px; }
+  footer .row { display: flex; flex-wrap: wrap; gap: 8px 28px; justify-content: space-between; }
+  footer a { color: var(--ink-2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <a class="brand" href="./"><img src="icon.png" alt="" width="30" height="30">MacMon Indicator</a>
+    <nav class="links" aria-label="Page">
+      <a class="opt" href="#features">Features</a>
+      <a class="opt" href="#footprint">Footprint</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/vothanhdat/macmon-menubar">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div>
+        <p class="eyebrow">For Apple Silicon Macs</p>
+        <h1>See what your Mac is doing, and what it did all week.</h1>
+        <p class="lede">A tiny menu bar monitor: CPU, GPU, RAM, power, battery, temperature, fans and disk. It keeps
+          <b>30 days of history</b>, adds up what <b>each app used</b> over 90 days, and shows the same charts
+          <b>in a terminal over SSH</b>.</p>
+        <div class="cmd">
+          <pre id="brew">brew install --cask vothanhdat/tap/macmon-indicator</pre>
+          <button type="button" data-copy="brew" aria-label="Copy the install command">Copy</button>
+        </div>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/vothanhdat/macmon-menubar/releases/latest">Download the app</a>
+          <a class="btn" href="https://github.com/vothanhdat/macmon-menubar">Source on GitHub</a>
+        </div>
+        <p class="req">Free and open source (MIT). Apple Silicon, macOS 13 or newer.</p>
+      </div>
+
+      <div class="screen">
+        <div class="menubar" aria-hidden="true">
+          <span class="dots"><span></span></span>
+          <picture>
+            <source srcset="menubar-dark.png" media="(prefers-color-scheme: dark)">
+            <img src="menubar-light.png" alt="" width="94" height="34">
+          </picture>
+          <span>Sat 14:02</span>
+        </div>
+        <div class="menu">
+          <picture>
+            <source srcset="dropdown-dark.png" media="(prefers-color-scheme: dark)">
+            <img src="dropdown-light.png" width="840" height="996"
+                 alt="The menu: charts for CPU, GPU, RAM, power, battery, temperature, fans, disk and disk operations over the last 5 minutes, above a list of the top processes by CPU, CPU time, RAM, disk and kernel time.">
+          </picture>
+        </div>
+        <p class="caption">Screenshots use demo history and demo process names.</p>
+      </div>
+    </div>
+
+    <section id="features">
+      <h2>More than the numbers right now</h2>
+      <p class="sub">Most monitors show this second. MacMon Indicator also answers the questions you have afterwards.</p>
+      <div class="three">
+        <div class="card">
+          <span class="tag" style="background: var(--c-cpu)"></span>
+          <h3>What used my battery this week?</h3>
+          <p>Process History adds up CPU time, CPU energy, memory and disk for every app and program, over today, 24 hours, or 7, 30 or 90 days.</p>
+        </div>
+        <div class="card">
+          <span class="tag" style="background: var(--c-disk)"></span>
+          <h3>How is the Mac mini in the closet?</h3>
+          <p>SSH in and run <code>macmon-indicator</code>: the same charts, top processes and process history, drawn in the terminal.</p>
+        </div>
+        <div class="card">
+          <span class="tag" style="background: var(--c-ram)"></span>
+          <h3>Does the monitor itself cost much?</h3>
+          <p>About half a percent of one core and 22 to 31 MB of memory with the menu closed, measured and explained below.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="split">
+        <div>
+          <h2>A menu bar item you can read at a glance</h2>
+          <p>Two lines with an icon per value, or one line. Pick up to six metrics and adjust text size, spacing and opacity; the bar updates live while you drag.</p>
+          <ul>
+            <li>Values turn <b>orange or red</b> past limits you set.</li>
+            <li>Fixed column widths, so the bar never jitters.</li>
+            <li>Starts at login, no Dock icon, stays out of the way.</li>
+          </ul>
+        </div>
+        <div class="pic bars">
+          <figure>
+            <span class="strip"><picture>
+              <source srcset="menubar-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="menubar-light.png" width="94" height="34" alt="Menu bar item showing CPU 20%, temperature 38°, RAM 58% and power 9.4 W.">
+            </picture></span>
+            <figcaption>Normal</figcaption>
+          </figure>
+          <figure>
+            <span class="strip"><picture>
+              <source srcset="menubar-warning-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="menubar-warning-light.png" width="94" height="34" alt="The same menu bar item with values past their limits shown in warning colors.">
+            </picture></span>
+            <figcaption>Past your limits</figcaption>
+          </figure>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="pic">
+          <div class="menu">
+            <picture>
+              <source srcset="dropdown-light.png" media="(prefers-color-scheme: dark)">
+              <img src="dropdown-dark.png" width="840" height="996" loading="lazy"
+                   alt="The same menu in the other appearance.">
+            </picture>
+          </div>
+          <p class="caption">It follows light and dark mode, with the same glass look as your other menus.</p>
+        </div>
+        <div>
+          <h2>History from one minute to thirty days</h2>
+          <p>A native macOS menu with charts for 1m, 5m, 1h, 24h, 7d and 30d. The solid bar is the average and the faint bar is the peak, so short spikes stay visible.</p>
+          <ul>
+            <li><b>Hover</b> to read the value at any moment; <b>click a chart</b> to see it alone at full width.</li>
+            <li><b>Top processes</b> by CPU, CPU time, RAM, disk and kernel time. Click a column for its top ten.</li>
+            <li><b>Disk operations</b> per second: many small reads and writes can slow a Mac while the MB/s stay low.</li>
+            <li>Keep it on screen in a resizable <b>dashboard window</b>.</li>
+            <li>Sleep and time the app wasn't running show as gaps, not as zeros.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="split">
+        <div>
+          <h2>What each program used, added up</h2>
+          <p>Every 5 minutes, in the background, the app reads each process's running totals and adds what changed to its program. Because the totals keep counting between scans, a process that is running at two scans is counted exactly.</p>
+          <ul>
+            <li>Kept by path, not pid: an app's helper processes add up under the app, and <code>node</code> keeps its history across Homebrew upgrades.</li>
+            <li>What 5-minute scans can't see is shown as <b>Unseen</b>, not hidden.</li>
+            <li>Hourly for 48 hours and daily for 90 days, in a file of a few MB.</li>
+          </ul>
+        </div>
+        <div class="pic">
+          <div class="card kept">
+            <p class="eyebrow">Kept for every app and program</p>
+            <ul class="chips">
+              <li>Running time</li><li>Launches</li><li>Average lifetime</li><li>Copies at once</li>
+              <li>CPU time</li><li>CPU energy</li><li>Average power</li>
+              <li>Average memory</li><li>Peak memory</li><li>Disk read</li><li>Disk written</li>
+            </ul>
+            <p class="eyebrow" style="margin-top: 22px">Over</p>
+            <ul class="chips">
+              <li>Today</li><li>24 hours</li><li>7 days</li><li>30 days</li><li>90 days</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="pic">
+          <div class="term">
+            <div class="title" aria-hidden="true"><i></i><i></i><i></i></div>
+<pre><span class="c"># the menu's charts and top processes, live</span>
+<span class="p">$</span> ssh mac-mini
+<span class="p">$</span> macmon-indicator
+
+<span class="c"># once, for scripts</span>
+<span class="p">$</span> macmon-indicator --once --json
+
+<span class="c"># process history over the last 7 days</span>
+<span class="p">$</span> macmon-indicator --once --history --range 7d</pre>
+          </div>
+        </div>
+        <div>
+          <h2>In a terminal, also over SSH</h2>
+          <p><code>macmon-indicator</code> gets its data from the app running on that Mac, so the numbers match the menu. The charts are drawn in braille dots and grow with the terminal.</p>
+          <ul>
+            <li>Switch range, sort column and view from the keyboard; filter process history as you type.</li>
+            <li><code>--once</code> prints and exits; <code>--json</code> is for scripts.</li>
+            <li>The two talk over a Unix socket that only your user can open.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="footprint">
+      <div class="split">
+        <div>
+          <h2>Small enough to forget about</h2>
+          <p>The sensors come from <a href="https://github.com/vladkens/macmon">macmon</a>, which needs no sudo. The app is AppKit only, draws its charts by hand, and redraws the menu bar only when a number has changed enough to matter.</p>
+          <ul>
+            <li>History is one fixed-size file of about 248 KB. It never grows.</li>
+            <li>Process scanning for the menu runs only while the menu, the window or a terminal view is open.</li>
+            <li>Sampling slows to every 10 s while the displays sleep, and stops during system sleep.</li>
+            <li>An optional, read-only <b>root mode</b> adds disk use of system processes. Off by default.</li>
+          </ul>
+        </div>
+        <div>
+          <table class="use">
+            <thead><tr><th>Process</th><th>CPU, one core</th><th>Memory</th></tr></thead>
+            <tbody>
+              <tr><td>MacMon Indicator</td><td>0.2–0.4%</td><td>11–20 MB</td></tr>
+              <tr><td>macmon</td><td>0.30%</td><td>11 MB</td></tr>
+              <tr><td>Total</td><td>~0.5–0.7%</td><td>~22–31 MB</td></tr>
+            </tbody>
+          </table>
+          <p class="fine">Measured on a MacBook Pro M4 Pro, on battery, 5 s interval, menu closed. Memory is footprint, as in Activity Monitor. The
+            <a href="https://github.com/vothanhdat/macmon-menubar#resource-use">README</a> has the details, including what it costs while the menu is open.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p class="sub">macmon is included in the app. After installing, open MacMon Indicator and turn on Settings → Launch at login.</p>
+      <div class="install">
+        <div class="card">
+          <span class="pill">Homebrew</span>
+          <p>The simplest way. It also puts <code>macmon-indicator</code> on your PATH, and there is no Gatekeeper prompt.</p>
+          <pre>brew install --cask \
+  vothanhdat/tap/macmon-indicator</pre>
+        </div>
+        <div class="card">
+          <span class="pill">Download</span>
+          <p>Get the zip from <a href="https://github.com/vothanhdat/macmon-menubar/releases/latest">Releases</a> and move the app to Applications. It isn't notarized, so clear the quarantine flag once:</p>
+          <pre>xattr -dr com.apple.quarantine \
+  "/Applications/MacMon Indicator.app"</pre>
+        </div>
+        <div class="card">
+          <span class="pill">From source</span>
+          <p>Needs the Xcode Command Line Tools and <code>brew install macmon</code>; Rust for the terminal view.</p>
+          <pre>git clone https://github.com/\
+vothanhdat/macmon-menubar.git
+cd macmon-menubar &amp;&amp; make install</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="row">
+      <span>MIT license. An unofficial frontend for <a href="https://github.com/vladkens/macmon">macmon</a> by vladkens, which it bundles.</span>
+      <span><a href="https://github.com/vothanhdat/macmon-menubar#readme">Documentation</a> · <a href="https://github.com/vothanhdat/macmon-menubar/releases">Releases</a> · <a href="https://github.com/vothanhdat/macmon-menubar/issues">Issues</a></span>
+    </div>
+  </footer>
+</div>
+
+<script>
+  document.querySelectorAll("button[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var text = document.getElementById(b.dataset.copy).textContent;
+      (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function () {
+        b.textContent = "Copied";
+      }, function () {
+        var r = document.createRange();
+        r.selectNodeContents(document.getElementById(b.dataset.copy));
+        var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+        b.textContent = "Selected";
+      }).then(function () { setTimeout(function () { b.textContent = "Copied" === b.textContent || "Selected" === b.textContent ? "Copy" : b.textContent; }, 1600); });
+    });
+  });
+</script>
+</body>
+</html>
