@@ -312,6 +312,7 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 ## Development
 
 ```bash
+make test                                                         # unit tests (swift test)
 make app                                                          # build into build/
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --snapshot out --demo   # render UI to PNGs
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --bar-previews looks.png # menu bar look sheet
@@ -320,6 +321,10 @@ make app                                                          # build into b
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --layout-previews l.png  # chart layout sheet
 ./build/macmon-indicator-helper --stdout | head                   # helper output (your processes)
 ```
+
+The tests in `Tests/` cover the history file (buckets, gaps, restart, reading a file from an older
+version), how process scans are added up, and the process history database. They use Swift Testing,
+which the Command Line Tools include, and write only to temporary folders.
 
 To measure memory the same way each time, run the binary with `MACMON_DEBUG_MENU_CYCLES=3`
 (and `MallocSpaceEfficient=1`, which `open` would set from the Info.plist). The app opens and closes

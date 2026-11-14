@@ -16,9 +16,13 @@ DIST_ZIP   := $(DIST_DIR)/MacMon-Indicator-$(VERSION).zip
 # macmon to bundle inside the app (the real file behind Homebrew's symlink). Override with MACMON=/path.
 MACMON     ?= $(shell p=$$(command -v macmon || echo /opt/homebrew/bin/macmon); [ -e "$$p" ] && realpath "$$p")
 
-.PHONY: all app run install uninstall clean check-macmon dist link-terminal
+.PHONY: all app test run install uninstall clean check-macmon dist link-terminal
 
 all: app
+
+# Unit tests (Tests/): the history file, process accounting and the process history database.
+test:
+	swift test
 
 $(BUILD_DIR)/$(HELPER): Helper/helper.c
 	@mkdir -p $(BUILD_DIR)

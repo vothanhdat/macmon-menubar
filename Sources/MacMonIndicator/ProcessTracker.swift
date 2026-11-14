@@ -200,7 +200,7 @@ final class ProcessTracker {
     // MARK: - Scanning
 
     /// One process as read now. Counters are totals since the process started.
-    private struct Seen {
+    struct Seen {
         var start: Double
         var path: String
         var cpu: Double
@@ -213,17 +213,13 @@ final class ProcessTracker {
         var detail: Bool
     }
 
-    private func scan() {
-        guard store != nil else { return }
-        let nowWall = Date().timeIntervalSince1970
-        let nowUp = DispatchTime.now().uptimeNanoseconds
-        let ticks = cpuTicks()
-        let procs = collect(now: nowWall)
-        let dt = lastUp > 0 && nowUp > lastUp ? Double(nowUp - lastUp) / 1e9 : 0
-        // Nothing to measure against: the first scan, or after a long gap (the app wasn't running),
-        // which can't be placed in time. Then this scan only sets the starting point.
-        let fresh = dt <= 0 || dt > Self.interval * 3 || nowWall < lastWall
-
+    /// What each program used between the last scan (`live`, read at `lastWall`) and this one
+    /// (`procs`, read at `nowWall`, `dt` awake seconds later), by key id, with the counters to
+    /// compare the next scan against and the CPU seconds found. A `fresh` scan has nothing to
+    /// measure against and only sets the starting point. No state: tested in AccountingTests.
+    static func account(_ procs: [pid_t: Seen], since live: [pid_t: TrackedProcess], lastWall: Double, nowWall: Double,
+                        dt: Double, fresh: Bool, keyID: (String) -> Int64)
+        -> (stats: [Int64: ProcStats], next: [pid_t: TrackedProcess], found: Double) {
         var acc: [Int64: ProcStats] = [:]
         var next: [pid_t: TrackedProcess] = [:]
         next.reserveCapacity(procs.count)
@@ -274,6 +270,25 @@ final class ProcessTracker {
                 acc[b.exe, default: ProcStats()].addCopy(e)
                 if b.app != 0 { acc[b.app, default: ProcStats()].addCopy(e) }
             }
+        }
+        return (acc, next, found)
+    }
+
+    private func scan() {
+        guard store != nil else { return }
+        let nowWall = Date().timeIntervalSince1970
+        let nowUp = DispatchTime.now().uptimeNanoseconds
+        let ticks = cpuTicks()
+        let procs = collect(now: nowWall)
+        let dt = lastUp > 0 && nowUp > lastUp ? Double(nowUp - lastUp) / 1e9 : 0
+        // Nothing to measure against: the first scan, or after a long gap (the app wasn't running),
+        // which can't be placed in time. Then this scan only sets the starting point.
+        let fresh = dt <= 0 || dt > Self.interval * 3 || nowWall < lastWall
+
+        let (stats, next, found) = Self.account(procs, since: live, lastWall: lastWall, nowWall: nowWall, dt: dt,
+                                                fresh: fresh, keyID: keyID)
+        var acc = stats
+        if !fresh {
             // CPU time no scan saw: the whole Mac's, minus what was found.
             if ticks.count == lastTicks.count, !ticks.isEmpty {
                 let busy = Double(zip(ticks, lastTicks).reduce(UInt64(0)) { $0 + UInt64($1.0 &- $1.1) }) / Double(sysconf(Int32(_SC_CLK_TCK)))
