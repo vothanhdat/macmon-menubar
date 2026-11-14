@@ -20,9 +20,15 @@ MACMON     ?= $(shell p=$$(command -v macmon || echo /opt/homebrew/bin/macmon); 
 
 all: app
 
-# Unit tests (Tests/): the history file, process accounting and the process history database.
+# Unit tests: the app's (Tests/, Swift) and the terminal view's (Terminal/src/proto.rs, Rust). Both
+# check the messages between the two against the same files in Tests/protocol/.
 test:
 	swift test
+	@if [ -x "$(CARGO)" ]; then \
+		"$(CARGO)" test --locked --quiet --manifest-path Terminal/Cargo.toml; \
+	else \
+		echo "Note: cargo not found, so the terminal view's tests are not run (https://rustup.rs)"; \
+	fi
 
 $(BUILD_DIR)/$(HELPER): Helper/helper.c
 	@mkdir -p $(BUILD_DIR)

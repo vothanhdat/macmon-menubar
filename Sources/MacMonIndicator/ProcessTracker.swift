@@ -42,7 +42,8 @@ final class ProcessTracker {
     /// Called on the main queue after each scan.
     var onScan: (() -> Void)?
 
-    private let queue = DispatchQueue(label: "MacMonIndicator.proctrack", qos: .utility)
+    /// Everything runs here. Not private: the tests run `record` and `summarize` on it.
+    let queue = DispatchQueue(label: "MacMonIndicator.proctrack", qos: .utility)
     private let store: ProcessHistoryStore?
     private var timer: DispatchSourceTimer?
 
@@ -279,7 +280,15 @@ final class ProcessTracker {
         let nowWall = Date().timeIntervalSince1970
         let nowUp = DispatchTime.now().uptimeNanoseconds
         let ticks = cpuTicks()
-        let procs = collect(now: nowWall)
+        record(collect(now: nowWall), nowWall: nowWall, nowUp: nowUp, ticks: ticks)
+        DispatchQueue.main.async { [weak self] in self?.onScan?() }
+    }
+
+    /// Adds one scan to the history: `procs` as read at `nowWall` (seconds since 1970) and `nowUp`
+    /// (uptime ns, which stops while asleep), with the whole Mac's busy CPU `ticks` then. Queue
+    /// only. The times are arguments so that the tests can run days of scans in a moment.
+    func record(_ procs: [pid_t: Seen], nowWall: Double, nowUp: UInt64, ticks: [UInt32]) {
+        guard store != nil else { return }
         let dt = lastUp > 0 && nowUp > lastUp ? Double(nowUp - lastUp) / 1e9 : 0
         // Nothing to measure against: the first scan, or after a long gap (the app wasn't running),
         // which can't be placed in time. Then this scan only sets the starting point.
@@ -306,7 +315,6 @@ final class ProcessTracker {
         lastWall = nowWall
         lastUp = nowUp
         lastTicks = ticks
-        DispatchQueue.main.async { [weak self] in self?.onScan?() }
     }
 
     /// Busy CPU ticks of the whole Mac (user, system, nice), all cores together.
@@ -417,25 +425,30 @@ final class ProcessTracker {
     /// Each program's totals over `range`, on the main queue.
     func summary(_ range: Range, _ done: @escaping (Summary) -> Void) {
         queue.async {
-            var result = Summary(lastScan: self.lastUp > 0 ? Date(timeIntervalSince1970: self.lastWall) : nil, helper: self.helper)
-            guard let store = self.store else { DispatchQueue.main.async { done(result) }; return }
-            let now = Date().timeIntervalSince1970
-            let today = Self.dayStart(now)
-            let start = range == .last24h ? Self.hourStart(now) - 23 * 3600 : Self.addDays(today, -(range.days - 1))
-            var rows: [Int64: ProcStats] = [:]
-            func merge(_ r: [Int64: ProcStats]) { for (k, s) in r { rows[k, default: ProcStats()].add(s) } }
-            // Whole days come from the daily rows, the rest (today, and days not added up yet) from hours.
-            let hoursFrom = range.days > 1 ? max(start, min(self.rolledUpTo, today)) : start
-            if range.days > 1 { merge(store.sum(span: 1, from: start, to: hoursFrom)) }
-            merge(store.sum(span: 0, from: hoursFrom, to: .max, excluding: self.hour))
-            if self.hour >= start { merge(self.current) }
-            for (k, s) in rows {
-                guard let path = self.keyPaths[k] else { continue }
-                if path == Self.unseenKey { result.unseen = s } else { result.programs.append((path, s)) }
-            }
-            result.since = store.firstBucket().map { Date(timeIntervalSince1970: Double(max($0, start))) }
+            let result = self.summarize(range, now: Date().timeIntervalSince1970)
             DispatchQueue.main.async { done(result) }
         }
+    }
+
+    /// Each program's totals over `range` ending at `now` (seconds since 1970). Queue only.
+    func summarize(_ range: Range, now: Double) -> Summary {
+        var result = Summary(lastScan: self.lastUp > 0 ? Date(timeIntervalSince1970: self.lastWall) : nil, helper: self.helper)
+        guard let store = self.store else { return result }
+        let today = Self.dayStart(now)
+        let start = range == .last24h ? Self.hourStart(now) - 23 * 3600 : Self.addDays(today, -(range.days - 1))
+        var rows: [Int64: ProcStats] = [:]
+        func merge(_ r: [Int64: ProcStats]) { for (k, s) in r { rows[k, default: ProcStats()].add(s) } }
+        // Whole days come from the daily rows, the rest (today, and days not added up yet) from hours.
+        let hoursFrom = range.days > 1 ? max(start, min(self.rolledUpTo, today)) : start
+        if range.days > 1 { merge(store.sum(span: 1, from: start, to: hoursFrom)) }
+        merge(store.sum(span: 0, from: hoursFrom, to: .max, excluding: self.hour))
+        if self.hour >= start { merge(self.current) }
+        for (k, s) in rows {
+            guard let path = self.keyPaths[k] else { continue }
+            if path == Self.unseenKey { result.unseen = s } else { result.programs.append((path, s)) }
+        }
+        result.since = store.firstBucket().map { Date(timeIntervalSince1970: Double(max($0, start))) }
+        return result
     }
 }
 

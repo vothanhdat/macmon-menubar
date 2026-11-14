@@ -1,0 +1,37 @@
+{
+  "ascending" : true,
+  "byExecutable" : true,
+  "columns" : [
+    {
+      "id" : "cpu",
+      "tip" : "CPU seconds used",
+      "title" : "CPU time"
+    }
+  ],
+  "footer" : [
+    "Unseen: 4.0s",
+    "Last scan 10:05"
+  ],
+  "kind" : "history",
+  "range" : 1,
+  "ranges" : [
+    "Today",
+    "24 Hours"
+  ],
+  "rows" : [
+    {
+      "cells" : [
+        "3h 12m"
+      ],
+      "name" : "node",
+      "path" : "/opt/homebrew/Cellar/node/*/bin/node",
+      "unknown" : [
+        true
+      ]
+    }
+  ],
+  "sortBy" : "cpu",
+  "total" : 77,
+  "tracking" : true,
+  "version" : 1
+}

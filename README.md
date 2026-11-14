@@ -312,7 +312,7 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 ## Development
 
 ```bash
-make test                                                         # unit tests (swift test)
+make test                                                         # unit tests (swift test, cargo test)
 make app                                                          # build into build/
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --snapshot out --demo   # render UI to PNGs
 "build/MacMon Indicator.app/Contents/MacOS/MacMonIndicator" --bar-previews looks.png # menu bar look sheet
@@ -323,8 +323,10 @@ make app                                                          # build into b
 ```
 
 The tests in `Tests/` cover the history file (buckets, gaps, restart, reading a file from an older
-version), how process scans are added up, and the process history database. They use Swift Testing,
-which the Command Line Tools include, and write only to temporary folders.
+version), how process scans are added up and kept by hour and day, and the process history
+database. They use Swift Testing, which the Command Line Tools include, write only to temporary
+folders, and take their times as arguments, so days of scans run in a moment. GitHub Actions runs
+`make test` and `make app` on every push and pull request (`.github/workflows/test.yml`).
 
 To measure memory the same way each time, run the binary with `MACMON_DEBUG_MENU_CYCLES=3`
 (and `MallocSpaceEfficient=1`, which `open` would set from the Info.plist). The app opens and closes
@@ -351,7 +353,10 @@ The terminal view finds a test build the same way: run both with the same
 (When that folder's path is too long for a socket address, over about 100 characters, both use the
 per-user temporary folder instead.) Its messages are in `Terminal/src/proto.rs` and
 `Sources/MacMonIndicator/TerminalServer.swift`; change them together and bump `version` in both
-when an older terminal view couldn't read the new replies.
+when an older terminal view couldn't read the new replies. `Tests/protocol/` holds a reply and a
+request of each kind, and both sides are tested against those files, so a field changed on one side
+only fails `make test`. After changing a reply on purpose, write the files again with
+`MMI_UPDATE_FIXTURES=1 swift test`, then make the Rust side read them.
 
 **Releasing a new version:**
 1. Set `VERSION` in the Makefile, and `version` in `Terminal/Cargo.toml`.

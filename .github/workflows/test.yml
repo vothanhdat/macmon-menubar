@@ -1,0 +1,37 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Apple Silicon, with Xcode (Swift, Swift Testing) and Rust already installed.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: |
+          sw_vers
+          swift --version
+          cargo --version
+      - name: Unit tests (Swift and Rust)
+        run: make test
+      # Without macmon on the runner the app is built without a bundled copy, which is fine here:
+      # this checks that the release build, the helper, the terminal view and the bundle still build.
+      - name: Build the app
+        run: make app
+      - name: Check the bundle
+        run: |
+          codesign --verify --deep --strict "build/MacMon Indicator.app"
+          "build/MacMon Indicator.app/Contents/MacOS/macmon-indicator" --help
+          ./build/macmon-indicator-helper --stdout | head -3

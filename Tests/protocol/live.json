@@ -1,0 +1,93 @@
+{
+  "app" : "9.8.7",
+  "charts" : [
+    {
+      "avg" : [
+        1.5,
+        null,
+        3
+      ],
+      "avg2" : [
+        0.75,
+        null
+      ],
+      "color" : "blue",
+      "color2" : "pink",
+      "detail" : "R 8M  W 4M",
+      "hi" : 100,
+      "hi2" : 50,
+      "hot" : true,
+      "id" : "disk",
+      "limit" : 90,
+      "lo" : 0.5,
+      "lo2" : 0.25,
+      "main" : "12M",
+      "max" : [
+        2,
+        null,
+        4
+      ],
+      "max2" : [
+        1.25,
+        null
+      ],
+      "shape" : "mirrored",
+      "title" : "Disk",
+      "warnStart" : 65
+    },
+    {
+      "avg" : [
+
+      ],
+      "color" : "indigo",
+      "hi" : 100,
+      "hot" : false,
+      "id" : "cpu",
+      "lo" : 0,
+      "main" : "42%",
+      "max" : [
+
+      ],
+      "shape" : "up",
+      "title" : "CPU"
+    }
+  ],
+  "columns" : 2,
+  "host" : "mac-mini",
+  "intervalMs" : 2000,
+  "kind" : "live",
+  "problem" : "macmon was not found",
+  "processHistory" : true,
+  "processes" : {
+    "columns" : [
+      {
+        "sort" : 3,
+        "title" : "CPU"
+      }
+    ],
+    "note" : "System processes: 3% CPU",
+    "rows" : [
+      {
+        "cells" : [
+          "12.5%"
+        ],
+        "name" : "node",
+        "pid" : 4321,
+        "strong" : 1
+      }
+    ],
+    "sort" : 3
+  },
+  "tier" : 1,
+  "tiers" : [
+    "1m",
+    "5m",
+    "1h"
+  ],
+  "time" : 1800000000.5,
+  "values" : {
+    "cpu_pct" : 42,
+    "gpu_pct" : null
+  },
+  "version" : 1
+}
