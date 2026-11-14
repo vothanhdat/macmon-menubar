@@ -151,7 +151,11 @@ final class Dashboard {
         }
         more += [a, s, q]
         // macOS 27 adds a gear to "Settings…" on its own; plain text keeps the items alike.
+        // The property is new in the macOS 27 SDK, which comes with Swift 6.4: an older Xcode
+        // (as on GitHub's runners) builds without this line, and such a build shows the gear.
+        #if compiler(>=6.4)
         if #available(macOS 27, *) { more.forEach { $0.preferredImageVisibility = .hidden } }
+        #endif
         items += more
         return items
     }
