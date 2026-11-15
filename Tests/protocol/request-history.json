@@ -1,1 +1,1 @@
-{"cmd":"history","range":4,"byExecutable":true,"sortBy":"energy","ascending":true,"filter":"chrome","limit":250}
+{"cmd":"history","range":4,"byExecutable":true,"sortBy":"energy","ascending":true,"filter":"chrome","limit":250,"chart":2,"chartPath":"/Applications/Google Chrome.app","chartRest":true}

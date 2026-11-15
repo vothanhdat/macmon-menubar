@@ -18,7 +18,11 @@ struct ProcStats {
     var ramOnePeak = 0.0   // bytes, the biggest single copy
     var diskRead = 0.0     // bytes
     var diskWritten = 0.0  // bytes
-    var detail = false     // energy, P-core time and disk bytes are known (not for system processes without root)
+    var detail = false     // energy, P-core time, disk bytes and children's CPU are known (not for system processes without root)
+    /// CPU seconds of the processes it started that ended and were collected by it, with theirs
+    /// (as macOS counts them: `ri_child_*`). Children the scans saw also count under their own
+    /// names, so this is not to be added to `cpu`.
+    var childCpu = 0.0
 
     /// Adds a later stretch of time: totals add up, peaks keep the highest.
     mutating func add(_ o: ProcStats) {
@@ -49,6 +53,7 @@ struct ProcStats {
         ramOnePeak = max(ramOnePeak, o.ramOnePeak)
         diskRead += o.diskRead
         diskWritten += o.diskWritten
+        childCpu += o.childCpu
         detail = detail || o.detail
     }
 }
@@ -64,6 +69,7 @@ struct TrackedProcess {
     var diskRead: Double
     var diskWritten: Double
     var detail: Bool
+    var childCpu = -1.0    // negative: not known (system processes without root, or an older helper)
 }
 
 /// Process history on disk, in `process-history.sqlite` next to `history.bin`:
@@ -81,10 +87,10 @@ final class ProcessHistoryStore {
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     private static let columns = "running, copy_time, peak_copies, launches, exits, lifetime, cpu, pcore, energy, " +
-        "ram_time, ram_peak, ram_one_peak, disk_read, disk_written, detail"
+        "ram_time, ram_peak, ram_one_peak, disk_read, disk_written, detail, child_cpu"
     private static let totals = "sum(running), sum(copy_time), max(peak_copies), sum(launches), sum(exits), " +
         "sum(lifetime), sum(cpu), sum(pcore), sum(energy), sum(ram_time), max(ram_peak), max(ram_one_peak), " +
-        "sum(disk_read), sum(disk_written), max(detail)"
+        "sum(disk_read), sum(disk_written), max(detail), sum(child_cpu)"
 
     init?(url: URL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -104,6 +110,16 @@ final class ProcessHistoryStore {
                 pcore real, energy real, disk_read real, disk_written real, detail integer);
             """)
         guard ok else { sqlite3_close(db); return nil }
+        // Added later (files from before have no value there: 0 in `stats`, not known in `live`).
+        for table in ["stats", "live"] where !hasColumn(table, "child_cpu") {
+            run("alter table \(table) add column child_cpu real")
+        }
+    }
+
+    private func hasColumn(_ table: String, _ column: String) -> Bool {
+        var found = false
+        run("select 1 from pragma_table_info(?) where name = ?", [table, column]) { _ in found = true }
+        return found
     }
 
     deinit { sqlite3_close(db) }
@@ -172,16 +188,16 @@ final class ProcessHistoryStore {
 
     private static func values(_ s: ProcStats) -> [Any?] {
         [s.running, s.copyTime, s.peakCopies, s.launches, s.exits, s.lifetime, s.cpu, s.pcore, s.energy,
-         s.ramTime, s.ramPeak, s.ramOnePeak, s.diskRead, s.diskWritten, s.detail]
+         s.ramTime, s.ramPeak, s.ramOnePeak, s.diskRead, s.diskWritten, s.detail, s.childCpu]
     }
 
-    /// Reads the 15 stats columns starting at column `i`.
+    /// Reads the 16 stats columns starting at column `i`.
     private static func stats(_ st: OpaquePointer, from i: Int32) -> ProcStats {
         func d(_ c: Int32) -> Double { sqlite3_column_double(st, i + c) }
         func n(_ c: Int32) -> Int { Int(sqlite3_column_int64(st, i + c)) }
         return ProcStats(running: d(0), copyTime: d(1), peakCopies: n(2), launches: n(3), exits: n(4), lifetime: d(5),
                          cpu: d(6), pcore: d(7), energy: d(8), ramTime: d(9), ramPeak: d(10), ramOnePeak: d(11),
-                         diskRead: d(12), diskWritten: d(13), detail: n(14) != 0)
+                         diskRead: d(12), diskWritten: d(13), detail: n(14) != 0, childCpu: d(15))
     }
 
     // MARK: - Meta and keys
@@ -224,7 +240,7 @@ final class ProcessHistoryStore {
 
     /// Replaces the rows of one bucket.
     func write(span: Int, bucket: Int64, _ rows: [Int64: ProcStats]) {
-        runMany("insert or replace into stats (span, bucket, key, \(Self.columns)) values (?, ?, ?\(String(repeating: ", ?", count: 15)))",
+        runMany("insert or replace into stats (span, bucket, key, \(Self.columns)) values (?, ?, ?\(String(repeating: ", ?", count: 16)))",
                 rows.map { [span, bucket, $0.key] + Self.values($0.value) })
     }
 
@@ -237,6 +253,27 @@ final class ProcessHistoryStore {
             out[sqlite3_column_int64(st, 0)] = Self.stats(st, from: 1)
         }
         return out
+    }
+
+    /// One key's rows in the buckets `from..<to`, oldest first.
+    func series(span: Int, key: Int64, from: Int64, to: Int64) -> [(bucket: Int64, stats: ProcStats)] {
+        var out: [(bucket: Int64, stats: ProcStats)] = []
+        guard from < to else { return out }
+        run("select bucket, \(Self.columns) from stats where span = ? and bucket >= ? and bucket < ? and key = ? order by bucket",
+            [span, from, to, key]) { st in
+            out.append((sqlite3_column_int64(st, 0), Self.stats(st, from: 1)))
+        }
+        return out
+    }
+
+    /// Every row in the buckets `from..<to`: bucket, key, stats.
+    func each(span: Int, from: Int64, to: Int64, _ body: (Int64, Int64, ProcStats) -> Void) {
+        guard from < to else { return }
+        withoutActuallyEscaping(body) { body in
+            _ = run("select bucket, key, \(Self.columns) from stats where span = ? and bucket >= ? and bucket < ?", [span, from, to]) { st in
+                body(sqlite3_column_int64(st, 0), sqlite3_column_int64(st, 1), Self.stats(st, from: 2))
+            }
+        }
     }
 
     /// Adds up the hours of the day `day..<next` into one row per key.
@@ -265,20 +302,21 @@ final class ProcessHistoryStore {
 
     func live() -> [pid_t: TrackedProcess] {
         var out: [pid_t: TrackedProcess] = [:]
-        run("select pid, start, exe, app, cpu, pcore, energy, disk_read, disk_written, detail from live", []) { st in
+        run("select pid, start, exe, app, cpu, pcore, energy, disk_read, disk_written, detail, child_cpu from live", []) { st in
             func d(_ c: Int32) -> Double { sqlite3_column_double(st, c) }
             out[pid_t(sqlite3_column_int64(st, 0))] = TrackedProcess(
                 start: d(1), exe: sqlite3_column_int64(st, 2), app: sqlite3_column_int64(st, 3), cpu: d(4), pcore: d(5),
-                energy: d(6), diskRead: d(7), diskWritten: d(8), detail: sqlite3_column_int64(st, 9) != 0)
+                energy: d(6), diskRead: d(7), diskWritten: d(8), detail: sqlite3_column_int64(st, 9) != 0,
+                childCpu: sqlite3_column_type(st, 10) == SQLITE_NULL ? -1 : d(10))
         }
         return out
     }
 
     func setLive(_ procs: [pid_t: TrackedProcess]) {
         run("delete from live")
-        runMany("insert into live (pid, start, exe, app, cpu, pcore, energy, disk_read, disk_written, detail) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        runMany("insert into live (pid, start, exe, app, cpu, pcore, energy, disk_read, disk_written, detail, child_cpu) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 procs.map { [Int64($0.key), $0.value.start, $0.value.exe, $0.value.app, $0.value.cpu, $0.value.pcore,
-                             $0.value.energy, $0.value.diskRead, $0.value.diskWritten, $0.value.detail] })
+                             $0.value.energy, $0.value.diskRead, $0.value.diskWritten, $0.value.detail, $0.value.childCpu] })
     }
 
     /// Deletes all process history.

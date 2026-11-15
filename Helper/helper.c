@@ -6,11 +6,13 @@
 // It accepts no other commands, never writes files, and only answers the user id given
 // with --uid (plus root).
 //
-// Output: "v3\n" then one line per process:
+// Output: "v4\n" then one line per process:
 //   pid \t cpu_ns \t kernel_ns \t phys_footprint \t disk_bytes_read \t disk_bytes_written \t
-//   start_us \t energy_nj \t pcore_cpu_ns \t lifetime_max_footprint \t name \t path
+//   start_us \t energy_nj \t pcore_cpu_ns \t lifetime_max_footprint \t child_cpu_ns \t name \t path
 // start_us is the start time in microseconds since 1970; path is empty when unknown.
-// (v2 ended after name; v1 also had no kernel_ns column. The app reads all three.)
+// child_cpu_ns is the CPU time of the children that ended and were collected, with theirs.
+// (v3 had no child_cpu_ns column; v2 ended after name, without the columns from start_us on;
+// v1 also had no kernel_ns column. The app reads all four.)
 //
 // Debug modes (no root needed, shows only your own processes):
 //   macmon-indicator-helper --stdout
@@ -61,7 +63,7 @@ static void write_snapshot(int fd) {
     if (!pids || !out) { free(pids); free(out); return; }
     int n = proc_listallpids(pids, (int)(cap * sizeof(pid_t)));
     size_t len = 0;
-    len += (size_t)snprintf(out, 8, "v3\n");
+    len += (size_t)snprintf(out, 8, "v4\n");
     for (int i = 0; i < n && (size_t)i < cap; i++) {
         // V6 adds energy and P-core time to V4's fields (same layout, appended). An older macOS
         // without V6 still gets the V4 part, with zeros for the rest.
@@ -86,13 +88,14 @@ static void write_snapshot(int fd) {
             out = bigger;
             size *= 2;
         }
-        int w = snprintf(out + len, LINE_MAX_LEN, "%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\t%s\n", pids[i],
+        int w = snprintf(out + len, LINE_MAX_LEN, "%d\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\t%s\n", pids[i],
                          (unsigned long long)to_ns(ru.ri_user_time + ru.ri_system_time),
                          (unsigned long long)to_ns(ru.ri_system_time), (unsigned long long)ru.ri_phys_footprint,
                          (unsigned long long)ru.ri_diskio_bytesread,
                          (unsigned long long)ru.ri_diskio_byteswritten, start_us, (unsigned long long)ru.ri_energy_nj,
                          (unsigned long long)to_ns(ru.ri_user_ptime + ru.ri_system_ptime),
-                         (unsigned long long)ru.ri_lifetime_max_phys_footprint, name, path);
+                         (unsigned long long)ru.ri_lifetime_max_phys_footprint,
+                         (unsigned long long)to_ns(ru.ri_child_user_time + ru.ri_child_system_time), name, path);
         if (w > 0 && w < LINE_MAX_LEN) len += (size_t)w; // drop (never expected) over-long lines
     }
     write_all(fd, out, len);

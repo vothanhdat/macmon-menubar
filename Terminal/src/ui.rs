@@ -9,8 +9,9 @@ use ratatui::widgets::{Block, BorderType, Widget};
 
 use crate::app::{App, View};
 use crate::chart;
-use crate::proto::{Chart, History, Processes};
-use crate::style::{self, bold, dim, fit, fg, right, selected, width, wrap, RED};
+use crate::proto::{Chart, History, HistoryChart, Processes};
+use crate::stack;
+use crate::style::{self, bold, dim, fit, fg, right, selected, width, wrap, Rgb, RED};
 
 /// Smallest usable size.
 const MIN_W: u16 = 44;
@@ -258,8 +259,118 @@ fn processes(buf: &mut Buffer, area: Rect, p: &Processes) -> u16 {
 // MARK: - Process history
 
 /// Columns the history table keeps first when the terminal is too narrow for all of them.
-const PRIORITY: [&str; 13] = ["name", "cpu", "cpuPct", "ramAvg", "energy", "running", "ramPeak", "diskRead",
-                              "diskWritten", "power", "launches", "copies", "life"];
+const PRIORITY: [&str; 14] = ["name", "cpu", "cpuPct", "ramAvg", "energy", "running", "ramPeak", "diskRead",
+                              "diskWritten", "power", "launches", "copies", "life", "childCpu"];
+
+/// Rows for the chart's columns in a terminal `h` rows high; None when the table needs them all.
+fn chart_rows(h: u16, once: bool) -> Option<u16> {
+    match h {
+        _ if once => Some(8),
+        44.. => Some(10),
+        32.. => Some(8),
+        26.. => Some(6),
+        _ => None,
+    }
+}
+
+/// The chart in a box at the top of `area` (its height is not used): the title and the measures
+/// in the border; inside, the scale and the columns, their times, and two lines for what the
+/// colors are or, with the column cursor, that column's numbers. Returns the rows used.
+fn history_chart(app: &mut App, c: &HistoryChart, area: Rect, rows: u16, buf: &mut Buffer, once: bool) -> u16 {
+    let box_h = rows + 5;
+    let measures: Vec<Span> = c.metrics.iter().enumerate()
+        .filter(|(i, _)| !once || *i == c.metric)
+        .map(|(i, m)| Span::styled(format!(" {m} "), if i == c.metric && !once { selected() } else { dim() }))
+        .collect();
+    let measures_w: usize = measures.iter().map(|s| width(&s.content)).sum();
+    let title = fit(&c.title, (area.width as usize).saturating_sub(measures_w + 6));
+    let inner = boxed(buf, Rect::new(area.x, area.y, area.width, box_h),
+                      Line::from(Span::styled(format!(" {title} "), bold())), Some(Line::from(measures)), None);
+    let n = c.labels.len();
+    if c.message.is_some() || n == 0 || c.segments.is_empty() {
+        let msg = c.message.as_deref().unwrap_or("Nothing to draw.");
+        let x = inner.x + inner.width.saturating_sub(width(msg) as u16) / 2;
+        put(buf, x, inner.y + rows / 2, msg, inner.width, dim());
+        return box_h;
+    }
+
+    // The scale at the left: its top, its middle and 0.
+    let gutter = c.scale.iter().map(|s| width(s)).max().unwrap_or(1).max(1) as u16 + 1;
+    for (label, row) in [(c.scale.first().map(String::as_str).unwrap_or(""), 0), (c.scale.get(1).map(String::as_str).unwrap_or(""), rows / 2),
+                         ("0", rows - 1)] {
+        put(buf, inner.x, inner.y + row, &right(label, gutter as usize - 1), gutter, dim());
+    }
+    let plot = Rect::new(inner.x + gutter, inner.y, inner.width.saturating_sub(gutter), rows);
+    let lay = stack::layout(n, plot.width);
+    stack::draw(buf, plot, c, &lay);
+    app.chart_cols = lay.cols.max(1);
+    // The column the cursor is on: counted back from the newest, which is at the right.
+    let cursor = app.cursor.filter(|_| !once && lay.cols > 0).map(|back| lay.cols - 1 - back.min(lay.cols - 1));
+
+    // Times under the columns: the cursor's, then from the newest back each one that has room.
+    let ly = plot.bottom();
+    let mut taken: Vec<(u16, u16)> = vec![];
+    let mut place = |buf: &mut Buffer, k: usize, st: Style| {
+        let Some(label) = c.labels.get(lay.first + k) else { return };
+        let lw = width(label) as u16;
+        if lw > plot.width {
+            return;
+        }
+        let x = (plot.x + k as u16 * lay.step).min(plot.right() - lw);
+        if taken.iter().any(|&(a, b)| x < b + 2 && a < x + lw + 2) {
+            return;
+        }
+        put(buf, x, ly, label, lw, st);
+        taken.push((x, x + lw));
+    };
+    if let Some(k) = cursor {
+        place(buf, k, selected());
+    }
+    for k in (0..lay.cols).rev() {
+        place(buf, k, dim());
+    }
+
+    // What the colors are; with the cursor, that column from the top down.
+    let mut items: Vec<(Option<Rgb>, String, Style)> = vec![];
+    if let Some(i) = cursor.map(|k| lay.first + k) {
+        let cell = |cells: &[String]| cells.get(i).cloned().unwrap_or_default();
+        items.push((None, cell(&c.times), bold()));
+        for s in c.segments.iter().rev().filter(|s| cell(&s.cells) != "–" || c.segments.len() == 1) {
+            items.push((Some(style::hex(&s.color)), format!("{} {}", s.name, cell(&s.cells)), Style::new()));
+        }
+        if let Some(l) = &c.line {
+            items.push((None, format!("{} {}", l.name, cell(&l.cells)), Style::new()));
+        }
+        if c.segments.len() > 1 {
+            items.push((None, format!("Total {}", cell(&c.totals)), Style::new()));
+        }
+        if !cell(&c.notes).is_empty() {
+            items.push((None, cell(&c.notes), dim()));
+        }
+    } else {
+        items.extend(c.segments.iter().map(|s| (Some(style::hex(&s.color)), s.name.clone(), dim())));
+        if let Some(l) = &c.line {
+            items.push((None, format!("{}: with [ ]", l.name), dim()));
+        }
+    }
+    let (left, end) = (inner.x + 1, inner.right());
+    let (mut x, mut row) = (left, 0);
+    for (color, text, st) in items {
+        let iw = width(&text) as u16 + if color.is_some() { 2 } else { 0 };
+        if x > left && x + iw > end {
+            (x, row) = (left, row + 1);
+        }
+        if row > 1 {
+            break;
+        }
+        let y = ly + 1 + row;
+        if let Some(rgb) = color {
+            x = put(buf, x, y, "■ ", end - x, fg(rgb));
+        }
+        x = put(buf, x, y, &text, end.saturating_sub(x), st) + 3;
+    }
+    box_h
+}
 
 fn history(app: &mut App, area: Rect, buf: &mut Buffer, once: bool) -> u16 {
     let Some(d) = app.history.take() else { return 0 };
@@ -294,6 +405,9 @@ fn history_table(app: &mut App, d: &History, area: Rect, buf: &mut Buffer, once:
         put(buf, area.x, y + 1, "Process history is off. Turn it on in MacMon Indicator's Settings.", w, Style::new());
         return y + 2 - area.y;
     }
+    if let (Some(c), Some(rows)) = (d.chart.as_ref(), chart_rows(area.height, once)) {
+        y += history_chart(app, c, Rect::new(area.x, y, w, 0), rows, buf, once);
+    }
 
     // Under the box: the selected row's path, the window's notes, the keys.
     let mut footer: Vec<(String, Style)> = vec![];
@@ -307,9 +421,10 @@ fn history_table(app: &mut App, d: &History, area: Rect, buf: &mut Buffer, once:
     }
     if !once {
         let keys = longest_fitting(&[
-            "1–5 ←→ range   e apps/executables   s sort   r reverse   / filter   ↑↓ move   h live   q quit",
-            "1–5 range  e apps/exe  s sort  r reverse  / filter  ↑↓  h live  q quit",
-            "1–5 range  e group  s r sort  / filter  h live  q quit",
+            "1–5 ←→ range  e apps/executables  s sort  r reverse  / filter  ⏎ chart the row  c measure  w with the rest  [ ] column  v chart  h live  q quit",
+            "1–5 range  e apps/exe  s r sort  / filter  ⏎ chart row  c measure  w rest  [ ] column  v chart  h live  q quit",
+            "1–5 range  e group  s r sort  / filter  ⏎ c w [ ] v chart  h live  q quit",
+            "1–5 range  e s r /  ⏎ c w [ ] v chart  h  q",
         ], w);
         footer.push((keys.to_string(), dim()));
     }
@@ -383,7 +498,12 @@ fn history_table(app: &mut App, d: &History, area: Rect, buf: &mut Buffer, once:
         let cells: Vec<(String, Style)> = (0..cols.len()).map(|i| {
             let unknown = r.unknown.get(i).copied().unwrap_or(false);
             let st = if unknown { dim() } else { Style::new() };
-            (r.cells.get(i).cloned().unwrap_or_default(), if sel { st.add_modifier(Modifier::REVERSED) } else { st })
+            let mut text = r.cells.get(i).cloned().unwrap_or_default();
+            // The program the chart is of.
+            if Some(i) == name_i && app.pinned.as_deref() == Some(r.path.as_str()) {
+                text = format!("▸ {text}");
+            }
+            (text, if sel { st.add_modifier(Modifier::REVERSED) } else { st })
         }).collect();
         if sel {
             buf.set_style(Rect::new(inner.x, ry, inner.width, 1), Style::new().add_modifier(Modifier::REVERSED));

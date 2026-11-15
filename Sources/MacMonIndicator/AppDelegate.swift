@@ -304,8 +304,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     reply(TerminalServer.encode(TerminalServer.history(req, summary: nil)))
                     return
                 }
-                tracker.summary(ProcessTracker.Range(rawValue: req.range ?? 0) ?? .today) { summary in
-                    reply(TerminalServer.encode(TerminalServer.history(req, summary: summary)))
+                let range = ProcessTracker.Range(rawValue: req.range ?? 0) ?? .today
+                tracker.summary(range) { summary in
+                    // The chart, when asked for, needs a second read: one program, or the top ones and all.
+                    switch TerminalServer.chartPlan(req, summary: summary) {
+                    case nil:
+                        reply(TerminalServer.encode(TerminalServer.history(req, summary: summary)))
+                    case .alone(let path):
+                        tracker.series(path, range) { s in
+                            reply(TerminalServer.encode(TerminalServer.history(req, summary: summary, chart: .alone(path, s))))
+                        }
+                    case .stack(let paths, let pinned):
+                        tracker.overview(paths, range, byExecutable: req.byExecutable ?? false) { o in
+                            reply(TerminalServer.encode(TerminalServer.history(req, summary: summary, chart: .stack(o, pinned: pinned))))
+                        }
+                    }
                 }
             }
         }

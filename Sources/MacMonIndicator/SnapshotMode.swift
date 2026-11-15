@@ -277,24 +277,33 @@ enum SnapshotMode {
                 print(String(format: "today: %d executables, %d apps; CPU found %.1f s, unseen %.1f s; energy %.1f J",
                              execs.count, s.programs.count - execs.count, found, s.unseen.cpu,
                              execs.reduce(0) { $0 + $1.stats.energy }))
-                print("name                           running launch exit copies   cpu s energy J   ram avg  ram peak      read   written")
+                print("name                           running launch exit copies   cpu s child s energy J   ram avg  ram peak      read   written")
                 for p in s.programs.sorted(by: { $0.stats.cpu > $1.stats.cpu }).prefix(15) {
                     let t = p.stats
                     let name = String(ProcKey.name(p.path).prefix(30))
-                    print(name.padding(toLength: 30, withPad: " ", startingAt: 0) + String(format: " %7.0f %6d %4d %6.2f %7.2f %8.2f %9@ %9@ %9@ %9@",
+                    print(name.padding(toLength: 30, withPad: " ", startingAt: 0) + String(format: " %7.0f %6d %4d %6.2f %7.2f %7.2f %8.2f %9@ %9@ %9@ %9@",
                                  t.running, t.launches, t.exits,
-                                 t.running > 0 ? t.copyTime / t.running : 0, t.cpu, t.energy,
+                                 t.running > 0 ? t.copyTime / t.running : 0, t.cpu, t.childCpu, t.energy,
                                  HistoryFmt.bytes(t.running > 0 ? t.ramTime / t.running : 0) as NSString,
                                  HistoryFmt.bytes(t.ramPeak) as NSString,
                                  HistoryFmt.bytes(t.detail ? t.diskRead : -1) as NSString,
                                  HistoryFmt.bytes(t.detail ? t.diskWritten : -1) as NSString))
                 }
                 let wc = ProcessHistoryWindowController(tracker: tracker)
-                wc.window?.setContentSize(NSSize(width: 1100, height: 620))
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                let size = NSSize(width: 1180, height: 760)
+                wc.window?.setContentSize(size)
+                // MACMON_DEBUG_PROCESS_RANGE, MACMON_DEBUG_PROCESS_METRIC: which range (0–4) and
+                // chart (0–3) to show, on a kept file with more history than these few scans.
+                // MACMON_DEBUG_PROCESS_SELECT: 1 the first row alone, 2 with the rest (else all programs).
+                let env = ProcessInfo.processInfo.environment
+                let range = env["MACMON_DEBUG_PROCESS_RANGE"].flatMap(Int.init).flatMap(ProcessTracker.Range.init) ?? .today
+                let metric = env["MACMON_DEBUG_PROCESS_METRIC"].flatMap(Int.init).flatMap(ProcessHistoryWindowController.Metric.init) ?? .cpu
+                let select = env["MACMON_DEBUG_PROCESS_SELECT"].flatMap(Int.init) ?? 0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { wc.preview(range: range, metric: metric, select: select > 0, withRest: select == 2) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                     guard let view = wc.window?.contentView else { exit(1) }
                     wc.window?.contentView = NSView()
-                    view.frame.size = NSSize(width: 1100, height: 620)
+                    view.frame.size = size
                     for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
                         var bg = NSColor.windowBackgroundColor
                         NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
@@ -327,7 +336,8 @@ enum SnapshotMode {
             if let h = RootHelper.snapshot() {
                 let p = h.processes.values
                 print("helper v\(h.version): \(p.count) processes, \(p.filter { $0.path != nil }.count) with path, " +
-                      "\(p.filter { ($0.energyNj ?? 0) > 0 }.count) with energy, \(p.filter { $0.startUs != nil }.count) with start time")
+                      "\(p.filter { ($0.energyNj ?? 0) > 0 }.count) with energy, \(p.filter { $0.startUs != nil }.count) with start time, " +
+                      "\(p.filter { ($0.childNs ?? 0) > 0 }.count) with children's CPU time")
             } else {
                 print("helper not reachable")
             }

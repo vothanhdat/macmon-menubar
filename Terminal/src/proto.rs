@@ -33,6 +33,15 @@ pub struct Request {
     pub filter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// The chart's measure (an index into `HistoryChart::metrics`); none: no chart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart: Option<usize>,
+    /// The program to chart; none: the top programs stacked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_path: Option<String>,
+    /// That program with everything else, not alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chart_rest: Option<bool>,
 }
 
 /// Just the version, read first: a reply from a newer app may not fit the structs below.
@@ -128,6 +137,53 @@ pub struct History {
     pub total: usize,
     pub rows: Vec<HistoryRow>,
     pub footer: Vec<String>,
+    /// When the request asked for one.
+    pub chart: Option<HistoryChart>,
+}
+
+/// Columns per hour or day, each a stack of segments (one segment for a program alone).
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct HistoryChart {
+    pub metrics: Vec<String>,
+    pub metric: usize,
+    pub title: String,
+    /// The program it is of; none: all programs.
+    pub path: Option<String>,
+    /// With everything else.
+    pub rest: bool,
+    /// Why there is nothing to draw.
+    pub message: Option<String>,
+    /// Each column's time, short and in full.
+    pub labels: Vec<String>,
+    pub times: Vec<String>,
+    /// The top of the scale, in the unit of the segments' values.
+    pub top: f64,
+    /// The scale's top and middle, as text.
+    pub scale: Vec<String>,
+    /// Bottom to top.
+    pub segments: Vec<HistorySegment>,
+    pub totals: Vec<String>,
+    /// A second measure of a program alone: only its numbers are shown.
+    pub line: Option<HistoryLine>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct HistorySegment {
+    pub name: String,
+    /// "#rrggbb"
+    pub color: String,
+    pub values: Vec<f64>,
+    pub cells: Vec<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct HistoryLine {
+    pub name: String,
+    pub cells: Vec<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -248,6 +304,28 @@ mod tests {
         assert_eq!(h.rows[0].cells, ["3h 12m"]);
         assert_eq!(h.rows[0].unknown, [true]);
         assert_eq!(h.footer, ["Unseen: 4.0s", "Last scan 10:05"]);
+
+        let c = h.chart.as_ref().unwrap();
+        assert_eq!(c.metrics, ["CPU", "Energy"]);
+        assert_eq!(c.metric, 1);
+        assert_eq!(c.title, "node and everything else · per hour");
+        assert_eq!(c.path.as_deref(), Some("/opt/homebrew/Cellar/node/*/bin/node"));
+        assert!(c.rest);
+        assert_eq!(c.message.as_deref(), Some("Nothing recorded in this range."));
+        assert_eq!(c.labels, ["14:00", "15:00"]);
+        assert_eq!(c.times, ["Sun 15 Nov, 14:00–15:00", "Sun 15 Nov, 15:00–16:00"]);
+        assert_eq!(c.top, 3600.0);
+        assert_eq!(c.scale, ["1h 00m", "30m 00s"]);
+        assert_eq!(c.segments.len(), 1);
+        assert_eq!(c.segments[0].name, "node");
+        assert_eq!(c.segments[0].color, "#3987e5");
+        assert_eq!(c.segments[0].values, [725.0, 0.5]);
+        assert_eq!(c.segments[0].cells, ["12m 05s · 20%", "0.5s · 1.0%"]);
+        assert_eq!(c.totals, ["1h 00m", "48s"]);
+        let l = c.line.as_ref().unwrap();
+        assert_eq!(l.name, "Peak");
+        assert_eq!(l.cells, ["1.2G", "–"]);
+        assert_eq!(c.notes, ["Running 42m 00s", ""]);
     }
 
     /// The file lists every key the app encodes. One this program doesn't read is fine (`kind`,
@@ -279,10 +357,19 @@ mod tests {
         assert_eq!(
             keys(&h),
             [
-                "ascending", "byExecutable", "columns", "footer", "kind", "range", "ranges", "rows", "sortBy",
+                "ascending", "byExecutable", "chart", "columns", "footer", "kind", "range", "ranges", "rows", "sortBy",
                 "total", "tracking", "version"
             ]
         );
+        assert_eq!(
+            keys(&h["chart"]),
+            [
+                "labels", "line", "message", "metric", "metrics", "notes", "path", "rest", "scale", "segments", "times",
+                "title", "top", "totals"
+            ]
+        );
+        assert_eq!(keys(&h["chart"]["segments"][0]), ["cells", "color", "name", "values"]);
+        assert_eq!(keys(&h["chart"]["line"]), ["cells", "name"]);
         assert_eq!(keys(&h["columns"][0]), ["id", "tip", "title"]);
         assert_eq!(keys(&h["rows"][0]), ["cells", "name", "path", "unknown"]);
     }
@@ -306,6 +393,9 @@ mod tests {
             ascending: Some(true),
             filter: Some("chrome".into()),
             limit: Some(250),
+            chart: Some(2),
+            chart_path: Some("/Applications/Google Chrome.app".into()),
+            chart_rest: Some(true),
             ..Default::default()
         };
         assert_eq!(serde_json::to_string(&history).unwrap(), REQUEST_HISTORY.trim_end());

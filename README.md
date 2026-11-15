@@ -119,7 +119,15 @@ macmon-indicator
   process history, `q` quits.
 - **Process history**: `1`–`5` or `←` `→` for the range, `e` apps or executables, `s` / `S` sort
   column, `r` reverse, `/` filter (as you type; Enter keeps it, Esc clears it), `↑` `↓` PgUp PgDn to
-  move (the selected program's path shows at the bottom), Esc back.
+  move (the selected program's path shows at the bottom), Esc back. Over the table, in a terminal
+  of 26 rows or more, is the window's chart in block characters: the top programs stacked per hour
+  or day. Enter charts the row's program (marked `▸`; Enter again or Esc for all programs), `w`
+  switches it between alone and with the rest, `c` / `C` the measure (CPU, energy, memory, disk),
+  `[` `]` move to a column and show its numbers (Esc leaves), `v` hides the chart. A cell shows two
+  parts of a stack exactly; a third one ending in the same cell isn't seen. A program alone has
+  its second measure (children's CPU time, peak memory, bytes read) in the column's numbers only.
+  Without colors the columns show their height, not their parts. Too narrow for all 90 days: the
+  newest that fit.
 - **Once**: `macmon-indicator --once` prints the readings and top processes and exits (also when the
   output isn't a terminal). Add `--history` for process history, `--range 1h` (or `today`, `7d`, …)
   for the range, or use `--json` for the app's full reply, for scripts. `--help` lists everything.
@@ -237,8 +245,21 @@ come from the scans.
   each one.
 - **Energy** is CPU energy as macOS counts it per process (GPU work isn't included). **Power** is
   energy ÷ running time.
-- **System processes** show CPU time and memory only, unless root mode is on (then also energy and
-  disk). A root helper installed by an older version doesn't report these: turn root mode off and on.
+- **Children** is the CPU time of the processes a program started that have ended, with theirs, as
+  macOS counts it for the parent once it has collected them (`ri_child_*`). It catches the quick
+  `git` and compiler runs the scans miss, under whatever started them (your shell, `make`). A child
+  a scan did see also counts under its own name, so don't add Children to CPU time. Children still
+  running, and ones the parent never waited for, aren't in it.
+- **Chart** under the table, a column per hour (Today, 24 Hours) or per day, of CPU time, CPU
+  energy, memory or disk bytes written. With no row selected it stacks the programs with the most
+  of that (up to 8, each at least 1% of the total; their colours are next to their names in the
+  table), the rest as **Other**, and for CPU what no scan could place as **Unseen**. Select a row
+  for that program **Alone** (with its children's CPU time, peak memory or bytes read as a line) or
+  **With the rest** (its part of everything). Click the row again, or press Esc, for all programs.
+  Point at a column for its numbers. Stacked memory is averaged over the whole hour or day, so the
+  parts add up; a program alone shows its average while it was running.
+- **System processes** show CPU time and memory only, unless root mode is on (then also energy,
+  disk and children). A root helper installed by an older version doesn't report these: turn root mode off and on.
 - **Kept** hourly for 48 hours and daily for 90 days, in an SQLite file of a few MB. It's written once
   an hour and when the Mac sleeps or the app quits. A scan costs about 1 ms for your processes plus
   about 25 ms for `/bin/ps`. Turn it off or clear it in Settings.
@@ -255,10 +276,10 @@ helper ([`Helper/helper.c`](Helper/helper.c), ~150 lines):
 - **Started on demand** by launchd when the menu (or a process history scan) asks for data. It
   **exits after 30 s** idle.
 - **Read-only.** It answers exactly one request (`snapshot`) with per-process CPU time (and the
-  kernel's part of it), memory, disk bytes, start time, CPU energy, peak memory and path. It accepts
+  kernel's part of it), memory, disk bytes, start time, CPU energy, peak memory, its children's CPU time and path. It accepts
   no other commands, writes no files, and only answers your user id.
 - **After an update,** a helper installed by an older version keeps working but may report less
-  (kernel time for the process list; energy, disk and paths for Process History); the window that
+  (kernel time for the process list; energy, disk, paths and children's CPU time for Process History); the window that
   misses them says so. Turn the setting off and on to install the new one.
 
 Turning it off removes it (asks for the password again). Manual removal:

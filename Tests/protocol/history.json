@@ -1,6 +1,59 @@
 {
   "ascending" : true,
   "byExecutable" : true,
+  "chart" : {
+    "labels" : [
+      "14:00",
+      "15:00"
+    ],
+    "line" : {
+      "cells" : [
+        "1.2G",
+        "–"
+      ],
+      "name" : "Peak"
+    },
+    "message" : "Nothing recorded in this range.",
+    "metric" : 1,
+    "metrics" : [
+      "CPU",
+      "Energy"
+    ],
+    "notes" : [
+      "Running 42m 00s",
+      ""
+    ],
+    "path" : "/opt/homebrew/Cellar/node/*/bin/node",
+    "rest" : true,
+    "scale" : [
+      "1h 00m",
+      "30m 00s"
+    ],
+    "segments" : [
+      {
+        "cells" : [
+          "12m 05s · 20%",
+          "0.5s · 1.0%"
+        ],
+        "color" : "#3987e5",
+        "name" : "node",
+        "values" : [
+          725,
+          0.5
+        ]
+      }
+    ],
+    "times" : [
+      "Sun 15 Nov, 14:00–15:00",
+      "Sun 15 Nov, 15:00–16:00"
+    ],
+    "title" : "node and everything else · per hour",
+    "top" : 3600,
+    "totals" : [
+      "1h 00m",
+      "48s"
+    ]
+  },
   "columns" : [
     {
       "id" : "cpu",

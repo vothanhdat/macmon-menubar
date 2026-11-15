@@ -31,9 +31,16 @@ private final class Sim {
         tracker.queue.sync { tracker.record(procs, nowWall: wall, nowUp: up, ticks: [ticks, 0, 0]) }
     }
 
-    /// `/usr/bin/a` (pid 7, started long ago) with `cpu` CPU seconds so far.
+    /// `/usr/bin/a` (pid 7, started long ago) with `cpu` CPU seconds so far, and half as much
+    /// used by its children.
     func scan(cpu: Double, busy: Double = 0) {
-        scan([7: ProcessTracker.Seen(start: 1_000_000, path: Self.a, cpu: cpu, mem: 100, maxMem: 100, detail: true)], busy: busy)
+        scan([7: ProcessTracker.Seen(start: 1_000_000, path: Self.a, cpu: cpu, childCpu: cpu / 2, mem: 100, maxMem: 100, detail: true)],
+             busy: busy)
+    }
+
+    /// `/usr/bin/a` over `range`, a point per hour or day.
+    func points(_ range: ProcessTracker.Range) -> ProcessTracker.Series {
+        tracker.queue.sync { tracker.points(Self.a, range, now: wall) }
     }
 
     func summary(_ range: ProcessTracker.Range) -> ProcessTracker.Summary {
@@ -84,6 +91,86 @@ private let hour: Double = (day() / 3600).rounded(.down) * 3600 + 10 * 3600
         #expect(sim.a(.last24h).cpu == 25)
         #expect(sim.a(.last24h).running == 600)
         #expect(sim.summary(.last24h).lastScan == Date(timeIntervalSince1970: sim.wall))
+    }
+
+    @Test func pointsAreOnePerHourAndAddUpToTheSummary() {
+        let sim = Sim(at: hour - 400)
+        sim.scan(cpu: 100)
+        sim.advance(300)
+        sim.scan(cpu: 110)          // the hour before
+        sim.advance(300)
+        sim.scan(cpu: 125)          // this hour, still in memory
+        sim.advance(3 * 3600)       // two hours later, with nothing seen in between
+        sim.scan(cpu: 125)
+        sim.advance(300)
+        sim.scan(cpu: 126)
+        let s = sim.points(.last24h)
+        #expect(s.hourly)
+        #expect(s.points.count == 24)
+        #expect(s.points.last?.start == (sim.wall / 3600).rounded(.down) * 3600)
+        #expect(zip(s.points, s.points.dropFirst()).allSatisfy { $1.start - $0.start == 3600 })
+        #expect(s.points.suffix(5).map(\.stats.cpu) == [10, 15, 0, 0, 1])
+        #expect(s.points.suffix(5).map(\.stats.childCpu) == [5, 7.5, 0, 0, 0.5])
+        #expect(s.points.suffix(5).map(\.stats.running) == [300, 300, 0, 0, 300])
+        #expect(s.points.reduce(0) { $0 + $1.stats.cpu } == sim.a(.last24h).cpu)
+        #expect(sim.a(.last24h).childCpu == 13)
+        // After a restart the hour that was in memory comes from the file.
+        sim.restart()
+        #expect(sim.points(.last24h).points.suffix(5).map(\.stats.cpu) == [10, 15, 0, 0, 1])
+        // A program never seen: every hour, empty.
+        let none = sim.tracker.queue.sync { sim.tracker.points("/usr/bin/none", .last24h, now: sim.wall) }
+        #expect(none.points.count == 24)
+        #expect(none.points.allSatisfy { $0.stats.running == 0 })
+    }
+
+    /// An app with two executables, a tool outside any app, and CPU no scan saw.
+    @Test func stackIsSomeProgramsNextToAllOfThem() {
+        let main = "/Applications/Foo.app/Contents/MacOS/Foo", helper = "/Applications/Foo.app/Contents/MacOS/foo-helper"
+        let tool = "/usr/bin/tool", app = "/Applications/Foo.app"
+        func procs(_ a: Double, _ b: Double, _ c: Double) -> [pid_t: ProcessTracker.Seen] {
+            [1: .init(start: 1_000_000, path: main, cpu: a, mem: 100, maxMem: 100, detail: true),
+             2: .init(start: 1_000_000, path: helper, cpu: b, mem: 50, maxMem: 50, detail: true),
+             3: .init(start: 1_000_000, path: tool, cpu: c, mem: 10, maxMem: 10, detail: true)]
+        }
+        let sim = Sim(at: hour - 400)
+        sim.scan(procs(0, 0, 0))
+        sim.advance(300)
+        sim.scan(procs(4, 2, 1), busy: 10)      // the hour before: 7 s found of 10
+        sim.advance(300)
+        sim.scan(procs(10, 3, 1), busy: 7)      // this hour
+        func stack(_ paths: [String], byExecutable: Bool, _ range: ProcessTracker.Range = .last24h) -> ProcessTracker.Overview {
+            sim.tracker.queue.sync { sim.tracker.stack(paths, range, byExecutable: byExecutable, now: sim.wall) }
+        }
+
+        // Apps: the app (its executables together) and the tool; the executables don't count again.
+        let apps = stack([app, "/usr/bin/none"], byExecutable: false)
+        #expect(apps.hourly)
+        #expect(apps.starts.count == 24)
+        #expect(apps.programs.map(\.path) == [app, "/usr/bin/none"])
+        #expect(apps.programs[0].points.suffix(2).map(\.cpu) == [6, 7])
+        #expect(apps.programs[1].points.allSatisfy { $0.cpu == 0 })
+        #expect(apps.total.suffix(2).map(\.cpu) == [7, 7])
+        #expect(apps.total.dropLast(2).allSatisfy { $0.cpu == 0 })
+        #expect(apps.unseen.suffix(2).map(\.cpu) == [3, 0])
+        #expect(apps.awake.suffix(2) == [300, 300])
+        let ram: [Double] = apps.total.suffix(2).map(\.ramTime)
+        #expect(ram == [48000, 48000])                 // 100 + 50 + 10 bytes for 300 s
+        // Executables: each one, and not the app on top of them.
+        let exes = stack([helper, tool], byExecutable: true)
+        #expect(exes.programs[0].points.suffix(2).map(\.cpu) == [2, 1])
+        #expect(exes.programs[1].points.suffix(2).map(\.cpu) == [1, 0])
+        #expect(exes.total.suffix(2).map(\.cpu) == [7, 7])
+        // The parts add up to the table's rows, per day too and after a restart.
+        sim.restart()
+        let week = stack([app], byExecutable: false, .week)
+        #expect(!week.hourly)
+        #expect(week.starts.count == 7)
+        #expect(week.programs[0].points.last?.cpu == 13)
+        #expect(week.total.last?.cpu == 14)
+        #expect(week.unseen.last?.cpu == 3)
+        #expect(week.awake.last == 600)
+        let rows = sim.summary(.week).programs.filter { $0.path == app || $0.path == tool }
+        #expect(rows.reduce(0) { $0 + $1.stats.cpu } == 14)
     }
 
     @Test func savingAgainDoesNotCountTwice() throws {
@@ -221,6 +308,22 @@ private let hour: Double = (day() / 3600).rounded(.down) * 3600 + 10 * 3600
         #expect(sim.a(.week).peakCopies == 1)
         #expect(sim.a(.week).ramPeak == 100)
         #expect(sim.summary(.week).since == Date(timeIntervalSince1970: day()))
+
+        // Per day: days that have ended from their daily rows, today from its hours, and the
+        // points add up to the totals. Per hour: the same for the last 24.
+        let week = sim.points(.week)
+        #expect(!week.hourly)
+        #expect(week.points.map(\.start) == (-2...4).map { day($0) })
+        #expect(week.points.map(\.stats.cpu) == (-2...4).map { d in
+            Double(hours.filter { Double($0) >= day(d) && Double($0) < day(d + 1) }.count) * 2
+        })
+        #expect(week.points.reduce(0) { $0 + $1.stats.cpu } == sim.a(.week).cpu)
+        #expect(week.points.reduce(0) { $0 + $1.stats.childCpu } == sim.a(.week).childCpu)
+        #expect(sim.a(.week).childCpu == Double(scans - 1))
+        #expect(sim.points(.quarter).points.count == 90)
+        #expect(sim.points(.last24h).points.reduce(0) { $0 + $1.stats.cpu } == sim.a(.last24h).cpu)
+        #expect(sim.points(.today).points.reduce(0) { $0 + $1.stats.cpu } == sim.a(.today).cpu)
+        #expect(sim.points(.today).points.first?.start == day(4))
 
         // On disk: one daily row for each day that has ended, and no hours older than 48 h.
         for d in 0..<4 { #expect(try sim.saved(span: 1, bucket: Int64(day(d))) != nil, "day \(d)") }

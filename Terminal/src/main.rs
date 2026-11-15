@@ -6,6 +6,7 @@ mod app;
 mod chart;
 mod client;
 mod proto;
+mod stack;
 mod style;
 mod ui;
 
@@ -45,6 +46,8 @@ Usage: macmon-indicator [options]
 Keys, live view:     1-6 or ←→ range, s/S process sort, h process history, q quit
 Keys, history:       1-5 or ←→ range, e apps/executables, s/S sort column, r reverse,
                      / filter, ↑↓ PgUp PgDn move, Esc back, q quit
+      its chart:     Enter the row's program (again, or Esc: all programs), c/C measure,
+                     w alone or with the rest, [ ] a column's numbers, v hide or show
 ";
 
 const TIERS: [&str; 6] = ["1m", "5m", "1h", "24h", "7d", "30d"];

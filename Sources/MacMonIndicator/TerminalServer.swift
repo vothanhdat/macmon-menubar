@@ -172,6 +172,9 @@ final class TerminalServer {
         var ascending: Bool?
         var filter: String?
         var limit: Int?
+        var chart: Int?         // the chart's measure (ProcessHistoryWindowController.Metric); none: no chart
+        var chartPath: String?  // the program to chart; none: the top programs stacked
+        var chartRest: Bool?    // that program with everything else, not alone
     }
 
     struct Live: Encodable {
@@ -239,6 +242,38 @@ final class TerminalServer {
         var total: Int              // rows matching, before the limit
         var rows: [HistoryRow]
         var footer: [String]
+        var chart: HistoryChart?    // when the request asked for one
+    }
+
+    /// The Process History window's chart: columns per hour or day, each a stack of segments
+    /// (one segment for a program alone).
+    struct HistoryChart: Encodable {
+        var metrics: [String]       // the measures to choose from
+        var metric: Int
+        var title: String
+        var path: String?           // the program it is of; none: all programs
+        var rest: Bool              // with everything else
+        var message: String?        // why there is nothing to draw
+        var labels: [String]        // each column's time, short ("14:00", "15 Nov")
+        var times: [String]         // and in full
+        var top: Double             // the top of the scale, in the unit of `values`
+        var scale: [String]         // the scale's top and middle, as text
+        var segments: [HistorySegment] // bottom to top
+        var totals: [String]        // each column's total, as text
+        var line: HistoryLine?      // a second measure of a program alone (children's CPU time, peak memory, bytes read)
+        var notes: [String]         // more about each column ("" for nothing)
+    }
+
+    struct HistorySegment: Encodable {
+        var name: String
+        var color: String           // "#rrggbb"
+        var values: [Double]
+        var cells: [String]         // the values as text
+    }
+
+    struct HistoryLine: Encodable {
+        var name: String
+        var cells: [String]
     }
 
     struct HistoryColumn: Encodable {
@@ -341,8 +376,95 @@ extension TerminalServer {
                     charts: charts, values: values, processes: procs, processHistory: processHistory)
     }
 
+    /// What a history request's chart needs from the tracker.
+    enum ChartPlan {
+        case alone(String)                      // ProcessTracker.series of this path
+        case stack([String], pinned: String?)   // ProcessTracker.overview of these paths
+    }
+
+    /// The same, read.
+    enum ChartData {
+        case alone(String, ProcessTracker.Series)
+        case stack(ProcessTracker.Overview, pinned: String?)
+    }
+
+    /// Each top program's place in the palette, kept while it stays among them (as in the
+    /// window; shared by all terminals). Main queue only.
+    private static var slots: [String: Int] = [:]
+
+    private static func metric(_ req: Request) -> ProcessHistoryWindowController.Metric? {
+        req.chart.map { ProcessHistoryWindowController.Metric(rawValue: $0) ?? .cpu }
+    }
+
+    /// What to read for the chart a history request asks for; nil when it asks for none.
+    static func chartPlan(_ req: Request, summary: ProcessTracker.Summary) -> ChartPlan? {
+        guard let metric = metric(req) else { return nil }
+        if let path = req.chartPath, !path.isEmpty {
+            return req.chartRest == true ? .stack([path], pinned: path) : .alone(path)
+        }
+        var top = ProcessHistoryWindowController.top(
+            ProcessHistoryWindowController.rows(summary, byExecutable: req.byExecutable ?? false), metric)
+        slots = ProcessHistoryWindowController.slots(slots, top: top)
+        top.sort { (slots[$0] ?? 0) < (slots[$1] ?? 0) }
+        return .stack(top, pinned: nil)
+    }
+
+    /// The chart as the window draws it, with everything formatted.
+    static func chart(_ req: Request, summary: ProcessTracker.Summary, data: ChartData) -> HistoryChart {
+        typealias Window = ProcessHistoryWindowController
+        typealias View = ProcessHistoryChartView
+        let metric = metric(req) ?? .cpu
+        func hex(_ v: Int) -> String { String(format: "#%06x", v) }
+        var out = HistoryChart(metrics: Window.Metric.allCases.map(\.title), metric: metric.rawValue, title: "", path: nil, rest: false,
+                               message: nil, labels: [], times: [], top: 0, scale: [], segments: [], totals: [], line: nil, notes: [])
+        let model: View.Model?
+        var colors: [String] = []
+        switch data {
+        case .alone(let path, let series):
+            out.path = path
+            out.title = "\(ProcKey.name(path)) · per \(series.hourly ? "hour" : "day")"
+            model = Window.chartModel(series, metric)
+            if model == nil {
+                out.message = series.points.contains { $0.stats.running > 0 }
+                    ? "Not known for system processes without the root helper." : "Not seen running in this range."
+            }
+        case .stack(let o, let pinned):
+            out.path = pinned
+            out.rest = pinned != nil
+            out.title = Window.stackTitle(pinned, hourly: o.hourly, byExecutable: req.byExecutable ?? false, metric, summary)
+            colors = o.programs.map { hex(View.paletteDark[slots[$0.path] ?? 0]) }
+            model = Window.stackModel(o, metric, colors: o.programs.map { _ in .clear }, rest: pinned == nil ? "Other" : "Everything else")
+            if model == nil { out.message = "Nothing recorded in this range." }
+        }
+        guard let m = model else { return out }
+        out.labels = m.starts.map { View.timeLabel($0, hourly: m.hourly, long: false) }
+        out.times = m.starts.map { View.timeLabel($0, hourly: m.hourly, long: true) }
+        out.top = m.scaleTop
+        out.scale = [m.format(out.top), m.format(out.top / 2)]
+        out.notes = m.starts.indices.map { m.extra($0).joined(separator: " · ") }
+        if m.stack.isEmpty {
+            out.segments = [HistorySegment(name: m.barName, color: "#0a84ff", values: m.bars.map { $0 ?? 0 },
+                                           cells: m.bars.map { $0.map(m.format) ?? Fmt.dash })]
+            out.totals = out.segments[0].cells
+            if let line = m.line, let name = m.lineName {
+                out.line = HistoryLine(name: name, cells: line.map { $0.map(m.format) ?? Fmt.dash })
+            }
+        } else {
+            let totals = m.totals
+            out.totals = totals.map(m.format)
+            out.segments = m.stack.enumerated().map { k, seg in
+                // The programs first, then the greys: everything else, and CPU no scan could place.
+                let color = k < colors.count ? colors[k] : (seg.color == View.unseenColor ? "#636366" : "#8e8e93")
+                return HistorySegment(name: seg.name, color: color, values: seg.values, cells: seg.values.enumerated().map { i, v in
+                    v > 0 && totals[i] > 0 ? "\(m.format(v)) · \(HistoryFmt.pct(v / totals[i] * 100))" : Fmt.dash
+                })
+            }
+        }
+        return out
+    }
+
     /// Process history over a range, sorted and filtered as the Process History window does.
-    static func history(_ req: Request, summary: ProcessTracker.Summary?) -> History {
+    static func history(_ req: Request, summary: ProcessTracker.Summary?, chart data: ChartData? = nil) -> History {
         let range = ProcessTracker.Range(rawValue: req.range ?? 0) ?? .today
         let byExecutable = req.byExecutable ?? false
         let columns = ProcessHistoryWindowController.columns
@@ -366,7 +488,8 @@ extension TerminalServer {
                            HistoryRow(name: r.name, path: r.path, cells: columns.map { $0.text(r) },
                                       unknown: columns.map { $0.id != "name" && $0.value(r) < 0 })
                        },
-                       footer: footer)
+                       footer: footer,
+                       chart: summary.flatMap { s in data.map { chart(req, summary: s, data: $0) } })
     }
 
     private static func finite(_ v: Float) -> Float? { v.isFinite ? v : nil }

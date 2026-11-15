@@ -50,6 +50,16 @@ pub struct App {
     /// Table rows visible at the last draw.
     pub page: usize,
     pub limit: usize,
+    /// The chart over the table: shown, its measure, the program it is of (none: all programs,
+    /// stacked) and whether that one is shown with everything else.
+    pub chart_on: bool,
+    pub metric: usize,
+    pub pinned: Option<String>,
+    pub with_rest: bool,
+    /// The chart column whose numbers are shown, counted back from the newest.
+    pub cursor: Option<usize>,
+    /// Chart columns visible at the last draw.
+    pub chart_cols: usize,
 }
 
 impl App {
@@ -75,6 +85,12 @@ impl App {
             scroll: 0,
             page: 20,
             limit: 500,
+            chart_on: true,
+            metric: 0,
+            pinned: None,
+            with_rest: false,
+            cursor: None,
+            chart_cols: 24,
         }
     }
 
@@ -105,6 +121,9 @@ impl App {
                 ascending: Some(self.ascending),
                 filter: Some(self.filter.clone()),
                 limit: Some(self.limit),
+                chart: self.chart_on.then_some(self.metric),
+                chart_path: self.pinned.clone().filter(|_| self.chart_on),
+                chart_rest: (self.chart_on && self.pinned.is_some()).then_some(self.with_rest),
                 ..Default::default()
             },
         }
@@ -215,7 +234,38 @@ impl App {
             KeyCode::Char('e') => {
                 self.by_executable = !self.by_executable;
                 self.selected = 0;
+                self.pinned = None; // an app isn't among the executables
             }
+            // The chart: of the row's program (again: of all programs), its measure, alone or
+            // with the rest, shown or not.
+            KeyCode::Enter => {
+                let Some(path) = self.history.as_ref().and_then(|h| h.rows.get(self.selected)).map(|r| r.path.clone()) else {
+                    return Action::None;
+                };
+                self.pinned = if self.pinned.as_ref() == Some(&path) { None } else { Some(path) };
+                self.chart_on = true;
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                let n = self.history.as_ref().and_then(|h| h.chart.as_ref()).map(|c| c.metrics.len()).filter(|&n| n > 0).unwrap_or(4);
+                self.metric = (self.metric + if k.code == KeyCode::Char('c') { 1 } else { n - 1 }) % n;
+                self.chart_on = true;
+            }
+            KeyCode::Char('w') => self.with_rest = !self.with_rest,
+            KeyCode::Char('v') => self.chart_on = !self.chart_on,
+            // A column's numbers: older, newer.
+            KeyCode::Char('[') => {
+                self.cursor = Some(self.cursor.map_or(0, |c| c + 1).min(self.chart_cols.saturating_sub(1)));
+                return Action::None;
+            }
+            KeyCode::Char(']') => {
+                self.cursor = Some(self.cursor.map_or(0, |c| c.saturating_sub(1)));
+                return Action::None;
+            }
+            KeyCode::Esc if self.cursor.is_some() => {
+                self.cursor = None;
+                return Action::None;
+            }
+            KeyCode::Esc if self.pinned.is_some() => self.pinned = None,
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 let ids: Vec<String> = self.history.iter().flat_map(|h| h.columns.iter().map(|c| c.id.clone())).collect();
                 if ids.is_empty() {

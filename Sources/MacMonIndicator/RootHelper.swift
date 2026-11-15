@@ -70,14 +70,16 @@ enum RootHelper {
         var pcoreNs: UInt64?      // CPU time on performance cores
         var maxMem: Double?       // highest memory footprint over its life
         var path: String?
+        // Version 4 and later:
+        var childNs: UInt64?      // CPU time of its ended children
     }
 
     /// The helper version this app ships; an installed one below it lacks some columns.
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     /// Asks the helper for a snapshot of all processes. Returns nil if it is not reachable.
     /// Version 1 (an older installed helper) has no kernel time; versions 1 and 2 have no start
-    /// time, energy, P-core time, peak memory or path.
+    /// time, energy, P-core time, peak memory or path; version 3 has no children's CPU time.
     static func snapshot() -> (version: Int, processes: [pid_t: Process])? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -108,27 +110,33 @@ enum RootHelper {
             if n <= 0 { break }
             data.append(buf, count: n)
         }
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        let version = text.hasPrefix("v3\n") ? 3 : text.hasPrefix("v2\n") ? 2 : text.hasPrefix("v1\n") ? 1 : 0
+        return String(data: data, encoding: .utf8).flatMap(parse)
+    }
+
+    /// Reads a helper's reply (any version); nil when it isn't one.
+    static func parse(_ text: String) -> (version: Int, processes: [pid_t: Process])? {
+        let version = text.hasPrefix("v4\n") ? 4 : text.hasPrefix("v3\n") ? 3 : text.hasPrefix("v2\n") ? 2 : text.hasPrefix("v1\n") ? 1 : 0
         guard version > 0 else { return nil }
+        // v4: as v3, with child_cpu_ns before name
         // v3: pid \t cpu_ns \t kernel_ns \t footprint \t disk_read \t disk_write \t start_us \t energy_nj \t
         //     pcore_ns \t max_footprint \t name \t path
         // v2: pid \t cpu_ns \t kernel_ns \t footprint \t disk_read \t disk_write \t name
         // v1: the same without kernel_ns
-        let n = [1: 6, 2: 7, 3: 12][version]!, k = version >= 2 ? 1 : 0
+        let n = [1: 6, 2: 7, 3: 12, 4: 13][version]!, k = version >= 2 ? 1 : 0
         var out: [pid_t: Process] = [:]
         for line in text.split(separator: "\n").dropFirst() {
             let f = line.split(separator: "\t", maxSplits: n - 1, omittingEmptySubsequences: false)
             guard f.count == n, let pid = pid_t(f[0]), let cpu = UInt64(f[1]), let mem = Double(f[2 + k]),
                   let r = UInt64(f[3 + k]), let w = UInt64(f[4 + k]) else { continue }
-            var p = Process(name: String(f[version == 3 ? 10 : 5 + k]), cpuNs: cpu, kernelNs: k == 1 ? UInt64(f[2]) : nil,
+            var p = Process(name: String(f[version >= 3 ? n - 2 : 5 + k]), cpuNs: cpu, kernelNs: k == 1 ? UInt64(f[2]) : nil,
                             mem: mem, diskRead: r, diskWritten: w)
             if version >= 3 {
                 p.startUs = UInt64(f[6]).flatMap { $0 > 0 ? $0 : nil }
                 p.energyNj = UInt64(f[7])
                 p.pcoreNs = UInt64(f[8])
                 p.maxMem = Double(f[9])
-                p.path = f[11].isEmpty ? nil : String(f[11])
+                p.path = f[n - 1].isEmpty ? nil : String(f[n - 1])
+                if version >= 4 { p.childNs = UInt64(f[10]) }
             }
             out[pid] = p
         }

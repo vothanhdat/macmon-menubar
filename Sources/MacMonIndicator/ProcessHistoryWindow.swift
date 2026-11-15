@@ -1,7 +1,9 @@
 import AppKit
 
 /// Process history as a sortable table: one row per app (all its processes together) or per
-/// executable, over a chosen range. Created when opened, released when closed.
+/// executable, over a chosen range. Under it a chart over time: the top programs stacked, or the
+/// selected row alone or against everything else (click it again, or Esc, for all programs again).
+/// Created when opened, released when closed.
 final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate,
     NSSearchFieldDelegate {
     var onClose: (() -> Void)?
@@ -13,12 +15,38 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     private let search = NSSearchField()
     private let table = NSTableView()
     private let footer = NSTextField(wrappingLabelWithString: "")
+    private let chartTitle = NSTextField(labelWithString: "")
+    private let metricControl = NSSegmentedControl(labels: Metric.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
+    private let chart = ProcessHistoryChartView()
+    private var selectedPath: String?
+    private let restControl = NSSegmentedControl(labels: ["Alone", "With the rest"], trackingMode: .selectOne, target: nil, action: nil)
+    /// What the chart shows: the selected program alone (`series`), or programs stacked
+    /// (`overview`): the top ones, or the selected one and everything else.
+    private var series: ProcessTracker.Series?
+    private var overview: ProcessTracker.Overview?
+    /// Counts the chart's requests; a reply to an older one is dropped.
+    private var chartRequest = 0
+    /// Each top program's place in the palette, kept while it stays among them.
+    private var slots: [String: Int] = [:]
+    /// The colours of the programs in the stack of all programs, shown next to their names.
+    private var swatches: [String: NSColor] = [:]
+    private var selectionChanged = false
+    private var pendingDeselect: DispatchWorkItem?
     private var summary = ProcessTracker.Summary()
     private var rows: [Row] = []
     private var loaded = false
+    private var restoring = false
     private static let frameName = "ProcessHistory"
     private static let rangeKey = "processHistoryRange"
     private static let groupKey = "processHistoryByExecutable"
+    private static let metricKey = "processHistoryMetric"
+    private static let restKey = "processHistoryWithRest"
+
+    /// What the chart under the table shows.
+    enum Metric: Int, CaseIterable {
+        case cpu, energy, memory, disk
+        var title: String { ["CPU", "Energy", "Memory", "Disk"][rawValue] }
+    }
 
     struct Row {
         let name: String
@@ -32,6 +60,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         var ramAvg: Double { s.running > 0 ? s.ramTime / s.running : 0 }
         var diskRead: Double { s.detail ? s.diskRead : -1 }
         var diskWritten: Double { s.detail ? s.diskWritten : -1 }
+        var childCpu: Double { s.detail ? s.childCpu : -1 }
     }
 
     struct Column {
@@ -63,6 +92,9 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
                text: { Fmt.duration($0.s.cpu) }, value: { $0.s.cpu }),
         Column(id: "cpuPct", title: "CPU", width: 50, tip: "Average CPU while running (100% = one core)",
                text: { HistoryFmt.pct($0.cpuPct) }, value: { $0.cpuPct }),
+        Column(id: "childCpu", title: "Children", width: 72,
+               tip: "CPU time of the processes it started that have ended, with theirs. They also count under their own names when a scan saw them, so this is not to be added to CPU time. System processes need the root helper.",
+               text: { $0.childCpu >= 0 ? Fmt.duration($0.childCpu) : Fmt.dash }, value: { $0.childCpu }),
         Column(id: "energy", title: "Energy", width: 66, tip: "CPU energy used (GPU work is not included). System processes need the root helper.",
                text: { HistoryFmt.energy($0.energy) }, value: { $0.energy }),
         Column(id: "power", title: "Power", width: 58, tip: "Average CPU power while running",
@@ -79,12 +111,12 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
 
     init(tracker: ProcessTracker) {
         self.tracker = tracker
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 620),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Process History"
         w.isReleasedWhenClosed = false
         w.tabbingMode = .disallowed
-        w.contentMinSize = NSSize(width: 640, height: 300)
+        w.contentMinSize = NSSize(width: 640, height: 490)
         super.init(window: w)
         w.delegate = self
         build()
@@ -131,6 +163,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         table.dataSource = self
         table.delegate = self
         table.target = self
+        table.action = #selector(rowClicked)
         table.doubleAction = #selector(revealInFinder)
         table.sortDescriptors = [NSSortDescriptor(key: "cpu", ascending: false)]
         let scroll = NSScrollView()
@@ -143,8 +176,26 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         footer.textColor = .secondaryLabelColor
         footer.isSelectable = true
 
+        chartTitle.font = .systemFont(ofSize: 12, weight: .medium)
+        chartTitle.lineBreakMode = .byTruncatingMiddle
+        chartTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        metricControl.selectedSegment = min(Metric.allCases.count - 1, max(0, d.integer(forKey: Self.metricKey)))
+        metricControl.target = self
+        metricControl.action = #selector(metricChanged)
+        metricControl.controlSize = .small
+        restControl.selectedSegment = d.bool(forKey: Self.restKey) ? 1 : 0
+        restControl.target = self
+        restControl.action = #selector(restChanged)
+        restControl.controlSize = .small
+        restControl.toolTip = "The selected row on its own, or as its part of all of them"
+        restControl.isHidden = true
+        let chartSpacer = NSView()
+        chartSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let chartBar = NSStackView(views: [chartTitle, chartSpacer, restControl, metricControl])
+        chartBar.spacing = 12
+
         let content = NSView()
-        for v in [bar, scroll, footer] as [NSView] {
+        for v in [bar, scroll, chartBar, chart, footer] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
@@ -155,7 +206,15 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             scroll.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            footer.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 8),
+            chartBar.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 10),
+            chartBar.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            chartBar.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            chart.topAnchor.constraint(equalTo: chartBar.bottomAnchor, constant: 6),
+            chart.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
+            chart.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
+            chart.heightAnchor.constraint(equalToConstant: 200),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100),
+            footer.topAnchor.constraint(equalTo: chart.bottomAnchor, constant: 8),
             footer.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             footer.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
             footer.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
@@ -175,7 +234,179 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             self.summary = s
             self.loaded = true
             self.rebuildRows()
+            self.loadChart()
         }
+    }
+
+    private var withRest: Bool { restControl.selectedSegment == 1 }
+    private var metric: Metric { Metric(rawValue: metricControl.selectedSegment) ?? .cpu }
+
+    /// Reads what the chart shows: the selected program alone or with the rest, or with nothing
+    /// selected the top programs stacked.
+    private func loadChart() {
+        chartRequest += 1
+        let request = chartRequest
+        restControl.isHidden = selectedPath == nil
+        if let path = selectedPath, !withRest {
+            tracker.series(path, range) { [weak self] s in
+                guard let self, self.chartRequest == request else { return }
+                self.series = s
+                self.overview = nil
+                self.showChart()
+            }
+            return
+        }
+        var paths = selectedPath.map { [$0] } ?? Self.top(Self.rows(summary, byExecutable: byExecutable), metric)
+        if selectedPath == nil {
+            slots = Self.slots(slots, top: paths)
+            paths.sort { (slots[$0] ?? 0) < (slots[$1] ?? 0) } // stacked in the palette's order
+        }
+        tracker.overview(paths, range, byExecutable: byExecutable) { [weak self] o in
+            guard let self, self.chartRequest == request else { return }
+            self.overview = o
+            self.series = nil
+            self.showChart()
+        }
+    }
+
+    private func showChart() {
+        var marks: [String: NSColor] = [:]
+        chartTitle.toolTip = selectedPath
+        if let path = selectedPath, let series {
+            chartTitle.stringValue = "\(ProcKey.name(path)) · per \(series.hourly ? "hour" : "day")"
+            chart.message = series.points.contains { $0.stats.running > 0 }
+                ? "Not known for system processes without the root helper." : "Not seen running in this range."
+            chart.model = Self.chartModel(series, metric)
+        } else if let o = overview {
+            let colors = o.programs.map { ProcessHistoryChartView.palette[slots[$0.path] ?? 0] }
+            chartTitle.stringValue = Self.stackTitle(selectedPath, hourly: o.hourly, byExecutable: byExecutable, metric, summary)
+            chart.message = loaded ? "Nothing recorded in this range." : ""
+            chart.model = Self.stackModel(o, metric, colors: colors, rest: selectedPath == nil ? "Other" : "Everything else")
+            if selectedPath == nil, chart.model != nil {
+                marks = Dictionary(uniqueKeysWithValues: zip(o.programs.map(\.path), colors))
+            }
+        } else {
+            chartTitle.stringValue = ""
+            chart.model = nil
+        }
+        if marks != swatches {
+            swatches = marks
+            let column = table.column(withIdentifier: NSUserInterfaceItemIdentifier("name"))
+            if column >= 0 { table.reloadData(forRowIndexes: IndexSet(integersIn: 0..<rows.count), columnIndexes: [column]) }
+        }
+    }
+
+    /// What a stacked chart is of: all programs, or one and everything else.
+    static func stackTitle(_ selected: String?, hourly: Bool, byExecutable: Bool, _ metric: Metric, _ summary: ProcessTracker.Summary) -> String {
+        var title = selected.map { "\(ProcKey.name($0)) and everything else" } ?? "All \(byExecutable ? "executables" : "apps")"
+        title += " · per \(hourly ? "hour" : "day")"
+        // Energy and disk bytes of system processes are only known with the root helper.
+        if metric == .energy || metric == .disk, summary.programs.contains(where: { !$0.stats.detail }) {
+            title += " · system processes not included"
+        }
+        return title
+    }
+
+    /// The programs that get a colour of their own in the stack of all of them: the `limit` with
+    /// the most of what the chart shows, each at least 1% of the total. Biggest first.
+    static func top(_ rows: [Row], _ metric: Metric, limit: Int = ProcessHistoryChartView.palette.count) -> [String] {
+        func value(_ s: ProcStats) -> Double {
+            switch metric {
+            case .cpu: return s.cpu
+            case .energy: return s.energy
+            case .memory: return s.ramTime
+            case .disk: return s.diskWritten
+            }
+        }
+        let total = rows.reduce(0) { $0 + value($1.s) }
+        guard total > 0 else { return [] }
+        return rows.filter { value($0.s) >= total * 0.01 }
+            .sorted { value($0.s) != value($1.s) ? value($0.s) > value($1.s) : $0.path < $1.path }
+            .prefix(limit).map(\.path)
+    }
+
+    /// Places in the palette for the programs in `top`: one that was there before keeps its
+    /// place (and so its colour, when the range or the measure changes), new ones take the free
+    /// places in order.
+    static func slots(_ old: [String: Int], top: [String]) -> [String: Int] {
+        var out = old.filter { top.contains($0.key) }
+        var free = Set(0..<ProcessHistoryChartView.palette.count).subtracting(out.values).sorted()
+        for p in top where out[p] == nil && !free.isEmpty { out[p] = free.removeFirst() }
+        return out
+    }
+
+    /// Programs stacked in each column, then `rest` (all the others together) and, for CPU, what
+    /// no scan could place. Nil when there is nothing to draw. Memory is averaged over the time
+    /// the scans covered, not over the time each program ran, so that the parts add up.
+    static func stackModel(_ o: ProcessTracker.Overview, _ metric: Metric, colors: [NSColor], rest: String) -> ProcessHistoryChartView.Model? {
+        let n = o.starts.count
+        func value(_ s: ProcStats, _ i: Int) -> Double {
+            switch metric {
+            case .cpu: return s.cpu
+            case .energy: return s.energy
+            case .memory: return o.awake[i] > 0 ? s.ramTime / o.awake[i] : 0
+            case .disk: return s.diskWritten
+            }
+        }
+        var stack = o.programs.enumerated().map { k, p in
+            ProcessHistoryChartView.Segment(name: ProcKey.name(p.path), color: colors[k], values: (0..<n).map { value(p.points[$0], $0) })
+        }
+        let total = (0..<n).map { value(o.total[$0], $0) }
+        let others = (0..<n).map { i in max(0, total[i] - stack.reduce(0) { $0 + $1.values[i] }) }
+        // More than rounding leaves over.
+        if zip(others, total).contains(where: { $0 > $1 * 1e-9 }) {
+            stack.append(.init(name: rest, color: ProcessHistoryChartView.otherColor, values: others))
+        }
+        if metric == .cpu, o.unseen.contains(where: { $0.cpu > 0 }) {
+            stack.append(.init(name: "Unseen", color: ProcessHistoryChartView.unseenColor, values: o.unseen.map(\.cpu)))
+        }
+        guard stack.contains(where: { $0.values.contains { $0 > 0 } }) else { return nil }
+        let format: (Double) -> String, top: (Double) -> Double
+        switch metric {
+        case .cpu: (format, top) = (Fmt.duration, ProcessHistoryChartView.roundUpTime)
+        case .energy: (format, top) = (HistoryFmt.energy, { ProcessHistoryChartView.roundUp($0 / 3600) * 3600 })
+        case .memory, .disk: (format, top) = (HistoryFmt.bytes, ProcessHistoryChartView.roundUp)
+        }
+        return .init(starts: o.starts, hourly: o.hourly, bars: [], barName: "", format: format, top: top, stack: stack)
+    }
+
+    /// The chart of one measure, or nil when there is nothing to draw. Columns are per hour or
+    /// day; where the program wasn't running there is no column.
+    static func chartModel(_ series: ProcessTracker.Series, _ metric: Metric) -> ProcessHistoryChartView.Model? {
+        let pts = series.points.map(\.stats)
+        func values(_ f: (ProcStats) -> Double?) -> [Double?] { pts.map { $0.running > 0 ? f($0) : nil } }
+        var m: ProcessHistoryChartView.Model
+        let starts = series.points.map(\.start)
+        switch metric {
+        case .cpu:
+            m = .init(starts: starts, hourly: series.hourly, bars: values { $0.cpu }, barName: "CPU time",
+                      format: Fmt.duration, top: ProcessHistoryChartView.roundUpTime)
+            if pts.contains(where: { $0.detail && $0.childCpu > 0 }) {
+                m.line = values { $0.detail ? $0.childCpu : nil }
+                m.lineName = "Children’s CPU time"
+            }
+            m.extra = { i in
+                let s = pts[i]
+                guard s.running > 0 else { return [] }
+                return ["Running \(Fmt.duration(s.running)), \(HistoryFmt.pct(s.cpu / s.running * 100)) CPU on average"]
+            }
+        case .energy:
+            m = .init(starts: starts, hourly: series.hourly, bars: values { $0.detail ? $0.energy : nil }, barName: "CPU energy",
+                      format: HistoryFmt.energy, top: { ProcessHistoryChartView.roundUp($0 / 3600) * 3600 })
+            m.extra = { i in
+                let s = pts[i]
+                guard s.running > 0, s.detail else { return [] }
+                return ["\(HistoryFmt.power(s.energy / s.running)) on average over \(Fmt.duration(s.running)) running"]
+            }
+        case .memory:
+            m = .init(starts: starts, hourly: series.hourly, bars: values { $0.ramTime / $0.running }, barName: "Average memory",
+                      line: values { $0.ramPeak }, lineName: "Peak", format: HistoryFmt.bytes, top: ProcessHistoryChartView.roundUp)
+        case .disk:
+            m = .init(starts: starts, hourly: series.hourly, bars: values { $0.detail ? $0.diskWritten : nil }, barName: "Written",
+                      line: values { $0.detail ? $0.diskRead : nil }, lineName: "Read", format: HistoryFmt.bytes,
+                      top: ProcessHistoryChartView.roundUp)
+        }
+        return m.bars.contains { $0 != nil } ? m : nil
     }
 
     private func rebuildRows() {
@@ -183,7 +414,20 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         rows = Self.rows(summary, byExecutable: byExecutable, filter: filter)
         sortRows()
         table.reloadData()
+        restoreSelection()
         updateFooter()
+    }
+
+    /// Selects the chart's program again after the rows changed (it may be filtered out: then
+    /// the chart stays, with no row selected).
+    private func restoreSelection() {
+        restoring = true
+        defer { restoring = false }
+        if let path = selectedPath, let i = rows.firstIndex(where: { $0.path == path }) {
+            table.selectRowIndexes([i], byExtendingSelection: false)
+        } else {
+            table.deselectAll(nil)
+        }
     }
 
     private func sortRows() {
@@ -240,7 +484,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             }
             if summary.unseen.cpu >= 1 {
                 line += " Unseen: \(Fmt.duration(summary.unseen.cpu)) of CPU no scan could place: processes that ran between scans"
-                line += summary.helper == .ok ? "." : ", and the kernel's own work."
+                line += summary.helper == .ok || summary.helper == .old ? "." : ", and the kernel's own work."
             }
             parts.append(line)
         }
@@ -251,6 +495,8 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         switch summary.helper {
         case .outdated:
             parts.append("The root helper is out of date: turn “Show system processes” off and on in Settings for their energy and disk use.")
+        case .old:
+            parts.append("The root helper is an older version: turn “Show system processes” off and on in Settings for the children’s CPU time of system processes.")
         case .unreachable:
             parts.append("Root helper not reachable: system processes show CPU time and memory only.")
         case .notUsed where partial:
@@ -268,14 +514,54 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         reload()
     }
 
+    @objc private func metricChanged() {
+        UserDefaults.standard.set(metricControl.selectedSegment, forKey: Self.metricKey)
+        loadChart()
+    }
+
+    @objc private func restChanged() {
+        UserDefaults.standard.set(withRest, forKey: Self.restKey)
+        loadChart()
+    }
+
+    /// A click on the row that was already selected takes the selection off (back to all
+    /// programs), unless it turns out to be the first click of a double-click.
+    @objc private func rowClicked() {
+        defer { selectionChanged = false }
+        guard !selectionChanged, table.clickedRow >= 0, table.clickedRow == table.selectedRow else { return }
+        let work = DispatchWorkItem { [weak self] in self?.table.deselectAll(nil) }
+        pendingDeselect = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+    }
+
+    /// Esc: back to all programs.
+    override func cancelOperation(_ sender: Any?) {
+        if selectedPath != nil { table.deselectAll(nil) }
+    }
+
+    /// For previews: the given range and measure, with the first row selected or none.
+    func preview(range: ProcessTracker.Range, metric: Metric, select: Bool, withRest: Bool) {
+        rangeControl.selectedSegment = range.rawValue
+        metricControl.selectedSegment = metric.rawValue
+        restControl.selectedSegment = withRest ? 1 : 0
+        selectedPath = select ? rows.first?.path : nil
+        reload()
+    }
+
     @objc private func groupChanged() {
         UserDefaults.standard.set(byExecutable, forKey: Self.groupKey)
+        // An app is not among the executables, nor an executable inside an app among the apps.
+        if let path = selectedPath, !Self.rows(summary, byExecutable: byExecutable).contains(where: { $0.path == path }) {
+            selectedPath = nil
+        }
         rebuildRows()
+        loadChart()
     }
 
     func controlTextDidChange(_ obj: Notification) { rebuildRows() }
 
     @objc private func revealInFinder() {
+        pendingDeselect?.cancel()
         let r = table.clickedRow
         guard r >= 0, r < rows.count, rows[r].path.hasPrefix("/") else { return }
         var path = rows[r].path
@@ -295,6 +581,18 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         sortRows()
         table.reloadData()
+        restoreSelection()
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !restoring else { return }
+        let r = table.selectedRow
+        let path = r >= 0 && r < rows.count ? rows[r].path : nil
+        selectionChanged = true
+        DispatchQueue.main.async { [weak self] in self?.selectionChanged = false } // after this click's action, if it was a click
+        guard path != selectedPath else { return }
+        selectedPath = path
+        loadChart()
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -312,19 +610,42 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             f.alignment = col.id == "name" ? .left : .right
             cell.addSubview(f)
             cell.textField = f
+            // Names have a place before them for the colour of their part of the chart.
+            if col.id == "name" {
+                let mark = SwatchView()
+                mark.translatesAutoresizingMaskIntoConstraints = false
+                cell.addSubview(mark)
+                NSLayoutConstraint.activate([
+                    mark.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                    mark.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                    mark.widthAnchor.constraint(equalToConstant: 9),
+                    mark.heightAnchor.constraint(equalToConstant: 9),
+                ])
+            }
             NSLayoutConstraint.activate([
-                f.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                f.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: col.id == "name" ? 19 : 4),
                 f.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
                 f.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             ])
         }
         let r = rows[row]
+        if col.id == "name" { cell.subviews.compactMap { $0 as? SwatchView }.first?.color = swatches[r.path] }
         cell.textField?.stringValue = col.text(r)
         let unknown = col.value(r) < 0
         cell.textField?.textColor = unknown ? .tertiaryLabelColor : .labelColor
         cell.textField?.toolTip = col.id == "name" ? r.path : (col.id == "ramPeak" ? "Biggest single copy: \(HistoryFmt.bytes(r.s.ramOnePeak))" :
             (col.id == "cpu" && r.s.detail ? "On performance cores: \(Fmt.duration(r.s.pcore))" : nil))
         return cell
+    }
+}
+
+/// A small square of a chart colour (nothing when there is none).
+private final class SwatchView: NSView {
+    var color: NSColor? { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        guard let color else { return }
+        color.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 2, yRadius: 2).fill()
     }
 }
 

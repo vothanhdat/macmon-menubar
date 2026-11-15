@@ -60,6 +60,12 @@ pub fn named(name: &str) -> Rgb {
 
 pub const RED: Rgb = (255, 69, 58);
 
+/// "#rrggbb" (gray for anything else).
+pub fn hex(s: &str) -> Rgb {
+    let v = s.strip_prefix('#').filter(|h| h.len() == 6).and_then(|h| u32::from_str_radix(h, 16).ok());
+    v.map(|v| ((v >> 16) as u8, (v >> 8) as u8, v as u8)).unwrap_or((142, 142, 147))
+}
+
 /// A color for the terminal at hand.
 pub fn color(c: Rgb) -> Color {
     match mode() {

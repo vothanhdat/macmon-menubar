@@ -17,7 +17,8 @@ import Darwin
 ///
 /// Writes to disk once an hour (the hour that ended), and when the Mac sleeps or the app quits.
 final class ProcessTracker {
-    enum HelperState { case notUsed, ok, outdated, unreachable }
+    /// `old`: an installed helper from before this version, used without the columns added since.
+    enum HelperState { case notUsed, ok, old, outdated, unreachable }
 
     enum Range: Int, CaseIterable {
         case today, last24h, week, month, quarter
@@ -32,6 +33,27 @@ final class ProcessTracker {
         var helper = HelperState.notUsed
         /// The oldest data in the range (history may not reach back as far as the range).
         var since: Date?
+    }
+
+    /// One program over time: a point per hour (Today, 24 Hours) or per day.
+    struct Series {
+        var hourly = true
+        var points: [(start: Double, stats: ProcStats)] = []
+    }
+
+    /// Some programs over time next to all of them together, a value per hour or day.
+    struct Overview {
+        var hourly = true
+        var starts: [Double] = []
+        /// The programs asked for, in that order.
+        var programs: [(path: String, points: [ProcStats])] = []
+        /// All programs together: apps and what is outside any app, or every executable.
+        var total: [ProcStats] = []
+        /// CPU no scan could place.
+        var unseen: [ProcStats] = []
+        /// Seconds the scans covered in each hour or day (the Mac awake, the app running): what
+        /// memory × time is divided by for an average that adds up over programs.
+        var awake: [Double] = []
     }
 
     /// Seconds between scans. MACMON_DEBUG_PROCESS_INTERVAL: shorter, for testing.
@@ -209,6 +231,7 @@ final class ProcessTracker {
         var energy = 0.0
         var diskRead = 0.0
         var diskWritten = 0.0
+        var childCpu = -1.0     // CPU seconds of its ended children; negative: not known
         var mem: Double
         var maxMem: Double
         var detail: Bool
@@ -229,7 +252,8 @@ final class ProcessTracker {
             let exe = keyID(p.path)
             let app = ProcKey.app(of: p.path).map(keyID) ?? 0
             next[pid] = TrackedProcess(start: p.start, exe: exe, app: app, cpu: p.cpu, pcore: p.pcore, energy: p.energy,
-                                       diskRead: p.diskRead, diskWritten: p.diskWritten, detail: p.detail)
+                                       diskRead: p.diskRead, diskWritten: p.diskWritten, detail: p.detail,
+                                       childCpu: p.childCpu)
             guard !fresh else { continue }
             var d = ProcStats(peakCopies: 1, ramPeak: p.mem, ramOnePeak: max(p.mem, p.maxMem), detail: p.detail)
             let span: Double
@@ -241,6 +265,7 @@ final class ProcessTracker {
                     d.diskRead = max(0, p.diskRead - b.diskRead)
                     d.diskWritten = max(0, p.diskWritten - b.diskWritten)
                 }
+                if p.childCpu >= 0 && b.childCpu >= 0 { d.childCpu = max(0, p.childCpu - b.childCpu) }
                 span = dt
             } else if p.start >= lastWall - 2 {
                 // Started since the last scan: everything it used so far belongs to this interval.
@@ -250,6 +275,7 @@ final class ProcessTracker {
                 d.energy = p.energy
                 d.diskRead = p.diskRead
                 d.diskWritten = p.diskWritten
+                d.childCpu = max(0, p.childCpu)
                 span = min(dt, max(1, nowWall - p.start))
             } else {
                 span = dt // running before, but the last scan couldn't read it
@@ -334,13 +360,14 @@ final class ProcessTracker {
         if Settings.shared.useRootHelper && RootHelper.isInstalled {
             if let h = RootHelper.snapshot() {
                 if h.version >= 3 {
-                    helper = .ok
+                    helper = h.version >= RootHelper.currentVersion ? .ok : .old
                     for (pid, p) in h.processes {
                         let mem = p.mem
                         out[pid] = Seen(start: Double(p.startUs ?? 0) / 1e6, path: ProcKey.normalize(p.path ?? p.name),
                                         cpu: Double(p.cpuNs) / 1e9, pcore: Double(p.pcoreNs ?? 0) / 1e9,
                                         energy: Double(p.energyNj ?? 0) / 1e9, diskRead: Double(p.diskRead),
-                                        diskWritten: Double(p.diskWritten), mem: mem, maxMem: p.maxMem ?? mem, detail: true)
+                                        diskWritten: Double(p.diskWritten), childCpu: p.childNs.map { Double($0) / 1e9 } ?? -1,
+                                        mem: mem, maxMem: p.maxMem ?? mem, detail: true)
                     }
                     return out
                 }
@@ -391,7 +418,9 @@ final class ProcessTracker {
                             cpu: Double(ru.ri_user_time &+ ru.ri_system_time) * timebase,
                             pcore: Double(ru.ri_user_ptime &+ ru.ri_system_ptime) * timebase,
                             energy: Double(ru.ri_energy_nj) / 1e9, diskRead: Double(ru.ri_diskio_bytesread),
-                            diskWritten: Double(ru.ri_diskio_byteswritten), mem: Double(ru.ri_phys_footprint),
+                            diskWritten: Double(ru.ri_diskio_byteswritten),
+                            childCpu: Double(ru.ri_child_user_time &+ ru.ri_child_system_time) * timebase,
+                            mem: Double(ru.ri_phys_footprint),
                             maxMem: Double(ru.ri_lifetime_max_phys_footprint), detail: true)
         }
     }
@@ -449,6 +478,95 @@ final class ProcessTracker {
         }
         result.since = store.firstBucket().map { Date(timeIntervalSince1970: Double(max($0, start))) }
         return result
+    }
+
+    /// One program (a key's path) over `range`, on the main queue.
+    func series(_ path: String, _ range: Range, _ done: @escaping (Series) -> Void) {
+        queue.async {
+            let result = self.points(path, range, now: Date().timeIntervalSince1970)
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+
+    /// One program over `range` ending at `now`: a point for every hour or day of the range, with
+    /// empty stats where it wasn't seen. The points add up to its row in `summarize`. Queue only.
+    func points(_ path: String, _ range: Range, now: Double) -> Series {
+        let (hourly, start, today, buckets) = Self.buckets(range, now: now)
+        var rows: [Int64: ProcStats] = [:]
+        if let store, let key = keyIDs[path] {
+            func add(_ hour: Int64, _ s: ProcStats) { rows[hourly ? hour : Self.dayStart(Double(hour)), default: ProcStats()].add(s) }
+            // As in `summarize`: whole days from the daily rows, the rest from hours.
+            let hoursFrom = hourly ? start : max(start, min(rolledUpTo, today))
+            if !hourly { for r in store.series(span: 1, key: key, from: start, to: hoursFrom) { rows[r.bucket] = r.stats } }
+            for r in store.series(span: 0, key: key, from: hoursFrom, to: .max) where r.bucket != hour { add(r.bucket, r.stats) }
+            if hour >= start, let s = current[key] { add(hour, s) }
+        }
+        return Series(hourly: hourly, points: buckets.map { (Double($0), rows[$0] ?? ProcStats()) })
+    }
+
+    /// The hours (Today, 24 Hours) or days of `range` ending at `now`, oldest first.
+    private static func buckets(_ range: Range, now: Double) -> (hourly: Bool, start: Int64, today: Int64, buckets: [Int64]) {
+        let hourly = range.days == 1
+        let today = dayStart(now)
+        let start = range == .last24h ? hourStart(now) - 23 * 3600 : addDays(today, -(range.days - 1))
+        var buckets: [Int64] = []
+        if hourly {
+            var h = hourStart(Double(start))
+            if h < start { h += 3600 }
+            while h <= hourStart(now) { buckets.append(h); h += 3600 }
+        } else {
+            var d = start
+            while d <= today { buckets.append(d); d = addDays(d, 1) }
+        }
+        return (hourly, start, today, buckets)
+    }
+
+    /// The programs at `paths` and all programs together over `range`, on the main queue.
+    func overview(_ paths: [String], _ range: Range, byExecutable: Bool, _ done: @escaping (Overview) -> Void) {
+        queue.async {
+            let result = self.stack(paths, range, byExecutable: byExecutable, now: Date().timeIntervalSince1970)
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+
+    /// The programs at `paths` and all programs together, per hour or day of `range` ending at
+    /// `now`. "All" is what the table lists: apps and the executables outside any app, or with
+    /// `byExecutable` every executable, so that nothing counts twice. Queue only.
+    func stack(_ paths: [String], _ range: Range, byExecutable: Bool, now: Double) -> Overview {
+        let (hourly, start, today, buckets) = Self.buckets(range, now: now)
+        let empty = [ProcStats](repeating: ProcStats(), count: buckets.count)
+        var o = Overview(hourly: hourly, starts: buckets.map(Double.init), programs: paths.map { ($0, empty) }, total: empty,
+                         unseen: empty, awake: [Double](repeating: 0, count: buckets.count))
+        guard let store else { return o }
+        let index = Dictionary(uniqueKeysWithValues: buckets.enumerated().map { ($1, $0) })
+        var wanted: [Int64: Int] = [:]
+        for (i, p) in paths.enumerated() { if let k = keyIDs[p] { wanted[k] = i } }
+        let unseenID = keyIDs[Self.unseenKey]
+        var listed: [Int64: Bool] = [:]
+        func isListed(_ key: Int64) -> Bool {
+            if let v = listed[key] { return v }
+            let p = keyPaths[key] ?? ""
+            let v = byExecutable ? !ProcKey.isApp(p) : (ProcKey.isApp(p) || ProcKey.app(of: p) == nil)
+            listed[key] = v
+            return v
+        }
+        // The longest any program ran in each stored hour or day: the time the scans covered.
+        var covered: [[Int64: Double]] = [[:], [:]]
+        func add(_ bucket: Int64, daily: Bool, _ key: Int64, _ s: ProcStats) {
+            guard let i = index[hourly || daily ? bucket : Self.dayStart(Double(bucket))] else { return }
+            if key == unseenID { o.unseen[i].add(s); return }
+            covered[daily ? 1 : 0][bucket] = max(covered[daily ? 1 : 0][bucket] ?? 0, s.running)
+            if let k = wanted[key] { o.programs[k].points[i].add(s) }
+            if isListed(key) { o.total[i].add(s) }
+        }
+        // As in `summarize`: whole days from the daily rows, the rest from hours.
+        let hoursFrom = hourly ? start : max(start, min(rolledUpTo, today))
+        if !hourly { store.each(span: 1, from: start, to: hoursFrom) { add($0, daily: true, $1, $2) } }
+        store.each(span: 0, from: hoursFrom, to: .max) { b, k, s in if b != self.hour { add(b, daily: false, k, s) } }
+        if hour >= start { for (k, s) in current { add(hour, daily: false, k, s) } }
+        for (b, v) in covered[1] { if let i = index[b] { o.awake[i] += v } }
+        for (b, v) in covered[0] { if let i = index[hourly ? b : Self.dayStart(Double(b))] { o.awake[i] += v } }
+        return o
     }
 }
 
