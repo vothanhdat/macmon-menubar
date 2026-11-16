@@ -7,7 +7,7 @@ struct Tier {
     let capacity: Int
 }
 
-/// Fixed-size history kept in one memory-mapped file (~248 KB, never grows).
+/// Fixed-size history kept in one memory-mapped file (~273 KB, never grows).
 /// Each bucket stores avg + max per series. Updating history is just writing memory;
 /// the kernel writes dirty pages back to disk, and we nudge it once a minute.
 /// Partially filled buckets live in the file too, so a restart continues where it left off.

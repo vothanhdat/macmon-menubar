@@ -259,8 +259,8 @@ fn processes(buf: &mut Buffer, area: Rect, p: &Processes) -> u16 {
 // MARK: - Process history
 
 /// Columns the history table keeps first when the terminal is too narrow for all of them.
-const PRIORITY: [&str; 14] = ["name", "cpu", "cpuPct", "ramAvg", "energy", "running", "ramPeak", "diskRead",
-                              "diskWritten", "power", "launches", "copies", "life", "childCpu"];
+const PRIORITY: [&str; 16] = ["name", "cpu", "cpuPct", "ramAvg", "energy", "running", "ramPeak", "diskRead",
+                              "diskWritten", "netIn", "netOut", "power", "launches", "copies", "life", "childCpu"];
 
 /// Rows for the chart's columns in a terminal `h` rows high; None when the table needs them all.
 fn chart_rows(h: u16, once: bool) -> Option<u16> {

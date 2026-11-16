@@ -39,7 +39,8 @@ private func window(_ h: HistoryStore, _ tier: Int, _ series: Series = .cpu, now
         // Series are part of the format too: append only.
         #expect(Series.cpu.rawValue == 0)
         #expect(Series.diskWriteOps.rawValue == 19)
-        #expect(Series.allCases.count == 20)
+        #expect(Series.netOut.rawValue == 21)
+        #expect(Series.allCases.count == 22)
     }
 
     @Test func bucketKeepsAverageAndPeak() {
@@ -174,7 +175,7 @@ private func window(_ h: HistoryStore, _ tier: Int, _ series: Series = .cpu, now
         for i in 0..<5000 { h.add(sample(t0 + Double(i) * 7, cpu: 1)) }
         h.flush(sync: true)
         #expect(try size() == empty)
-        #expect(empty < 300_000) // "about 248 KB" in the README
+        #expect(empty < 300_000) // "about 273 KB" in the README
     }
 
     @Test func fileThatIsNotOursStartsEmpty() throws {
@@ -271,5 +272,33 @@ private func window(_ h: HistoryStore, _ tier: Int, _ series: Series = .cpu, now
         #expect(cells[3] == "12.500")
         #expect(cells[4] == "")                                  // no E-core reading
         #expect(cells[2 + Series.gpu.rawValue * 2] == "3.000")
+    }
+}
+
+@Suite struct NetworkFormatTests {
+    /// Network rates are kept in MB/s, but idle traffic is a few KB/s.
+    @Test func ratesPickTheirUnit() {
+        #expect(Fmt.netShort(.nan) == Fmt.dash)
+        #expect(Fmt.netShort(0.0004) == "0")
+        #expect(Fmt.netShort(0.014) == "14K")
+        #expect(Fmt.netShort(0.9996) == "1.0M")
+        #expect(Fmt.netShort(1.24) == "1.2M")
+        #expect(Fmt.netShort(120) == "120M")
+        #expect(Fmt.netShort(1100) == "1.1G")
+        #expect(Fmt.netRate(0.1) == "100 KB/s")
+        #expect(Fmt.netRate(2.5) == "2.5 MB/s")
+        #expect(Fmt.netRate(1200) == "1.2 GB/s")
+    }
+
+    @Test func networkChartIsMirrored() throws {
+        let row = try #require(ChartsView.rows(for: [.network], hasBattery: false, fanCount: 0).first)
+        #expect(row.series == .netIn)
+        guard case .mirrored(let down) = row.shape else { Issue.record("not mirrored"); return }
+        #expect(down == .netOut)
+        var s = Sample()
+        s.netIn = 0.014; s.netOut = 1.24
+        #expect(row.text({ s.value($0) }, s).main == "↓ 14K · ↑ 1.2M/s")
+        // A macmon older than 0.12 reports no network: dashes, not zeros.
+        #expect(row.text({ Sample().value($0) }, nil).main == "↓ – · ↑ –/s")
     }
 }

@@ -26,16 +26,16 @@ private final class Sim {
     func setClock(_ t: Double) { wall = t }
 
     /// One scan now; `busy` is the CPU seconds the whole Mac used since the last one.
-    func scan(_ procs: [pid_t: ProcessTracker.Seen], busy: Double = 0) {
+    func scan(_ procs: [pid_t: ProcessTracker.Seen], busy: Double = 0, net: [String: NetTopParser.Bytes] = [:]) {
         ticks += UInt32(busy * Double(sysconf(Int32(_SC_CLK_TCK))))
-        tracker.queue.sync { tracker.record(procs, nowWall: wall, nowUp: up, ticks: [ticks, 0, 0]) }
+        tracker.queue.sync { tracker.record(procs, nowWall: wall, nowUp: up, ticks: [ticks, 0, 0], net: net) }
     }
 
     /// `/usr/bin/a` (pid 7, started long ago) with `cpu` CPU seconds so far, and half as much
     /// used by its children.
-    func scan(cpu: Double, busy: Double = 0) {
+    func scan(cpu: Double, busy: Double = 0, net: [String: NetTopParser.Bytes] = [:]) {
         scan([7: ProcessTracker.Seen(start: 1_000_000, path: Self.a, cpu: cpu, childCpu: cpu / 2, mem: 100, maxMem: 100, detail: true)],
-             busy: busy)
+             busy: busy, net: net)
     }
 
     /// `/usr/bin/a` over `range`, a point per hour or day.
@@ -79,6 +79,34 @@ private func day(_ days: Int = 0) -> Double {
 private let hour: Double = (day() / 3600).rounded(.down) * 3600 + 10 * 3600
 
 @Suite struct ProcessTrackerTests {
+    @Test func networkBytesGoToTheProgramAndItsApp() {
+        let helper = "/Applications/B.app/Contents/Frameworks/B Helper.app/Contents/MacOS/B Helper"
+        let sim = Sim(at: hour + 100)
+        // Collected before the first scan: there is no interval to put it in.
+        sim.scan(cpu: 100, net: [Sim.a: .init(received: 999, sent: 999)])
+        sim.advance(300)
+        // `helper` ended before this scan: it has bytes but was never seen running.
+        sim.scan(cpu: 110, net: [Sim.a: .init(received: 5000, sent: 300), helper: .init(received: 70, sent: 8)])
+        sim.advance(300)
+        sim.scan(cpu: 120, net: [Sim.a: .init(received: 1000, sent: 0)])
+        #expect(sim.a(.today).netIn == 6000)
+        #expect(sim.a(.today).netOut == 300)
+        #expect(sim.a(.today).peakCopies == 1) // the bytes are not another copy
+        #expect(sim.a(.today).running == 600)
+        let programs = sim.summary(.today).programs
+        for path in [helper, "/Applications/B.app"] {
+            let s = programs.first { $0.path == path }?.stats
+            #expect(s?.netIn == 70, "\(path)")
+            #expect(s?.netOut == 8, "\(path)")
+            #expect(s?.running == 0, "\(path)")
+        }
+        // Saved and read back by a new tracker.
+        sim.restart()
+        #expect(sim.a(.today).netIn == 6000)
+        let p = sim.points(.today).points.map(\.stats)
+        #expect(p.reduce(0) { $0 + $1.netIn } == 6000)
+    }
+
     @Test func intervalBelongsToTheHourItsMiddleFallsIn() throws {
         let sim = Sim(at: hour - 400)
         sim.scan(cpu: 100)          // the first scan only sets the starting point

@@ -519,7 +519,7 @@ extension TerminalServer {
     static let exportColumns = [
         "start", "span", "kind", "name", "path", "running_s", "copy_time_s", "peak_copies", "launches", "exits", "lifetime_s",
         "cpu_s", "pcore_s", "child_cpu_s", "energy_j", "battery_energy_j", "ram_avg_bytes", "ram_peak_bytes", "ram_one_peak_bytes",
-        "disk_read_bytes", "disk_written_bytes",
+        "disk_read_bytes", "disk_written_bytes", "net_in_bytes", "net_out_bytes",
     ]
 
     /// Every program's numbers in each hour or day, as stored (seconds, joules, bytes). `kind`:
@@ -542,7 +542,7 @@ extension TerminalServer {
                 .number(s.running), .number(s.copyTime), .count(s.peakCopies), .count(s.launches), .count(s.exits), .number(s.lifetime),
                 .number(s.cpu), detail(s.pcore), detail(s.childCpu), detail(s.energy), detail(s.batteryEnergy),
                 .number(s.running > 0 ? s.ramTime / s.running : 0), .number(s.ramPeak), .number(s.ramOnePeak),
-                detail(s.diskRead), detail(s.diskWritten),
+                detail(s.diskRead), detail(s.diskWritten), .number(s.netIn), .number(s.netOut),
             ]
         })
     }

@@ -6,6 +6,9 @@ import Darwin
 /// the program's hour in ProcessHistoryStore. Programs are kept by executable path (not pid), and
 /// also by app bundle, so all of an app's helper processes add up.
 ///
+/// Network bytes come from NetTopSource instead, which reads them every few seconds: each scan
+/// adds what it collected since the scan before, also for processes that have ended.
+///
 /// The totals count between scans, so a process alive at two scans is counted exactly however long
 /// the gap. What scans miss: processes that start and end between two scans, and what a process
 /// used between the last scan and its end. That CPU time shows as "unseen": the whole Mac's CPU
@@ -98,6 +101,7 @@ final class ProcessTracker {
     private var unusual: [Unusual] = []
     private var lastOnBattery = false
     private var paths: [pid_t: (start: Double, path: String)] = [:]
+    private let net = NetTopSource()
     private let me = getuid()
     private let host = mach_host_self()
     private let timebase: Double = {
@@ -119,12 +123,16 @@ final class ProcessTracker {
         t.setEventHandler { [weak self] in self?.scan() }
         t.resume()
         timer = t
+        net.start()
     }
 
     /// Stops scanning and saves everything, so the next start continues from here.
     func stop() {
         timer?.cancel()
         timer = nil
+        net.stop()
+        // What the network source collected since the last scan belongs to the current hour.
+        queue.sync { if self.hour != 0 && self.lastUp > 0 { self.addNet(self.net.drain(), to: &self.current) } }
         save()
     }
 
@@ -137,6 +145,7 @@ final class ProcessTracker {
     func clear(then done: @escaping () -> Void) {
         queue.async {
             self.store?.clear()
+            _ = self.net.drain()
             self.keyIDs = [:]
             self.keyPaths = [:]
             self.live = [:]
@@ -319,21 +328,33 @@ final class ProcessTracker {
         return (acc, next, found)
     }
 
+    /// Adds network bytes by program path to the program's row and its app's.
+    private func addNet(_ net: [String: NetTopParser.Bytes], to acc: inout [Int64: ProcStats]) {
+        for (path, b) in net {
+            let d = ProcStats(netIn: b.received, netOut: b.sent)
+            acc[keyID(path), default: ProcStats()].addCopy(d)
+            if let app = ProcKey.app(of: path) { acc[keyID(app), default: ProcStats()].addCopy(d) }
+        }
+    }
+
     private func scan() {
         guard store != nil else { return }
         let nowWall = Date().timeIntervalSince1970
         let nowUp = DispatchTime.now().uptimeNanoseconds
         let ticks = cpuTicks()
-        record(collect(now: nowWall), nowWall: nowWall, nowUp: nowUp, ticks: ticks, onBattery: Battery.onBattery() ?? false)
+        record(collect(now: nowWall), nowWall: nowWall, nowUp: nowUp, ticks: ticks, onBattery: Battery.onBattery() ?? false,
+               net: net.drain())
         let unusual = self.unusual
         DispatchQueue.main.async { [weak self] in self?.onScan?(unusual) }
     }
 
     /// Adds one scan to the history: `procs` as read at `nowWall` (seconds since 1970) and `nowUp`
     /// (uptime ns, which stops while asleep), with the whole Mac's busy CPU `ticks` then, and
-    /// whether it ran on its battery. Queue only. The times are arguments so that the tests can
-    /// run days of scans in a moment.
-    func record(_ procs: [pid_t: Seen], nowWall: Double, nowUp: UInt64, ticks: [UInt32], onBattery: Bool = false) {
+    /// whether it ran on its battery, and the network bytes each program (by path) moved since
+    /// the scan before. Queue only. The times are arguments so that the tests can run days of
+    /// scans in a moment.
+    func record(_ procs: [pid_t: Seen], nowWall: Double, nowUp: UInt64, ticks: [UInt32], onBattery: Bool = false,
+                net: [String: NetTopParser.Bytes] = [:]) {
         guard store != nil else { return }
         let dt = lastUp > 0 && nowUp > lastUp ? Double(nowUp - lastUp) / 1e9 : 0
         // Nothing to measure against: the first scan, or after a long gap (the app wasn't running),
@@ -347,6 +368,7 @@ final class ProcessTracker {
             // On battery at both scans: all of the energy; at one of them: half.
             let share = ((onBattery ? 0.5 : 0) + (lastOnBattery ? 0.5 : 0))
             if share > 0 { for k in acc.keys { acc[k]!.batteryEnergy = acc[k]!.energy * share } }
+            addNet(net, to: &acc)
             // CPU time no scan saw: the whole Mac's, minus what was found.
             if ticks.count == lastTicks.count, !ticks.isEmpty {
                 let busy = Double(zip(ticks, lastTicks).reduce(UInt64(0)) { $0 + UInt64($1.0 &- $1.1) }) / Double(sysconf(Int32(_SC_CLK_TCK)))

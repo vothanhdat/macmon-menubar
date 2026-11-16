@@ -318,7 +318,7 @@ private func twoScans(_ before: [pid_t: Seen], _ after: [pid_t: Seen], keys: Key
     private func stats(cpu: Double, peak: Double = 0) -> ProcStats {
         ProcStats(running: 60, copyTime: 90, peakCopies: 2, launches: 3, exits: 1, lifetime: 12.5, cpu: cpu, pcore: 0.5,
                   energy: 2.25, ramTime: 1e9, ramPeak: peak, ramOnePeak: peak / 2, diskRead: 1e6, diskWritten: 2e6, detail: true,
-                  childCpu: cpu / 4)
+                  childCpu: cpu / 4, netIn: 3e6, netOut: 4e5)
     }
 
     @Test func keysGetOneIdPerPath() throws {
@@ -351,6 +351,8 @@ private func twoScans(_ before: [pid_t: Seen], _ after: [pid_t: Seen], keys: Key
         #expect(back.diskWritten == s.diskWritten)
         #expect(back.detail == s.detail)
         #expect(back.childCpu == s.childCpu)
+        #expect(back.netIn == 3e6)
+        #expect(back.netOut == 4e5)
     }
 
     @Test func seriesIsOneKeysRowsOldestFirst() throws {
@@ -397,6 +399,7 @@ private func twoScans(_ before: [pid_t: Seen], _ after: [pid_t: Seen], keys: Key
             #expect(row.diskWritten == 20)
             #expect(row.detail)
             #expect(row.childCpu == 0)
+            #expect(row.netIn == 0 && row.netOut == 0) // from before network was counted
             #expect(store.sum(span: 0, from: 0, to: .max)[1]?.childCpu == 0)
             #expect(store.live()[77]?.childCpu == -1)
             #expect(store.live()[77]?.cpu == 12.5)
@@ -406,6 +409,8 @@ private func twoScans(_ before: [pid_t: Seen], _ after: [pid_t: Seen], keys: Key
         #expect(store.sum(span: 0, from: 0, to: .max)[1]?.childCpu == 2)
         store.rollUp(day: hour, next: hour + 86400)
         #expect(store.stats(span: 1, bucket: hour)[1]?.childCpu == 2)
+        #expect(store.stats(span: 1, bucket: hour)[1]?.netIn == 3e6)
+        #expect(store.sum(span: 0, from: 0, to: .max)[1]?.netOut == 4e5)
     }
 
     @Test func writingAnHourAgainReplacesIt() throws {

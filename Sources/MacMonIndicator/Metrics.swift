@@ -28,6 +28,8 @@ struct Sample {
     var diskWrite: Float = .nan
     var diskReadOps: Float = .nan  // operations per second
     var diskWriteOps: Float = .nan
+    var netIn: Float = .nan        // MB/s over Ethernet and Wi-Fi (needs macmon 0.12)
+    var netOut: Float = .nan
 
     var ramPct: Float { ramTotalGB > 0 ? ramUsedGB / ramTotalGB * 100 : .nan }
 
@@ -53,6 +55,8 @@ struct Sample {
         case .diskWrite: return diskWrite
         case .diskReadOps: return diskReadOps
         case .diskWriteOps: return diskWriteOps
+        case .netIn: return netIn
+        case .netOut: return netOut
         }
     }
 }
@@ -62,6 +66,7 @@ enum Series: Int, CaseIterable {
     case cpu, ecpu, pcpu, gpu, ram, swap, cpuPower, gpuPower, anePower, sysPower
     case batteryW, batteryPct, cpuTemp, gpuTemp, fan0, fan1, diskRead, diskWrite
     case diskReadOps, diskWriteOps
+    case netIn, netOut
 
     var csvName: String {
         switch self {
@@ -85,6 +90,8 @@ enum Series: Int, CaseIterable {
         case .diskWrite: return "disk_write_mbs"
         case .diskReadOps: return "disk_read_ops"
         case .diskWriteOps: return "disk_write_ops"
+        case .netIn: return "net_in_mbs"
+        case .netOut: return "net_out_mbs"
         }
     }
 }
@@ -93,7 +100,7 @@ enum Level: Int { case normal, warn, critical }
 
 /// Metrics that can be placed in the menu bar.
 enum BarMetric: String, CaseIterable {
-    case cpu, gpu, ram, ramGB, swap, power, cpuPower, gpuPower, battery, batteryPct, cpuTemp, gpuTemp, fan, disk, diskOps
+    case cpu, gpu, ram, ramGB, swap, power, cpuPower, gpuPower, battery, batteryPct, cpuTemp, gpuTemp, fan, disk, diskOps, net
 
     var title: String {
         switch self {
@@ -112,6 +119,7 @@ enum BarMetric: String, CaseIterable {
         case .fan: return "Fan speed"
         case .disk: return "Disk read + write"
         case .diskOps: return "Disk operations"
+        case .net: return "Network down + up"
         }
     }
 
@@ -128,6 +136,7 @@ enum BarMetric: String, CaseIterable {
         case .fan: return "fanblades"
         case .disk: return "internaldrive"
         case .diskOps: return "internaldrive.fill"
+        case .net: return "network"
         }
     }
 
@@ -142,6 +151,7 @@ enum BarMetric: String, CaseIterable {
         case .fan: return "8.8k"
         case .disk: return "888M"
         case .diskOps: return "888k"
+        case .net: return "888K"
         }
     }
 
@@ -162,6 +172,7 @@ enum BarMetric: String, CaseIterable {
         case .fan: return Fmt.rpmShort(Self.fanValue(s))
         case .disk: return Fmt.mbShort(s.diskRead + s.diskWrite)
         case .diskOps: return Fmt.ops(s.diskReadOps + s.diskWriteOps)
+        case .net: return Fmt.netShort(s.netIn + s.netOut)
         }
     }
 
@@ -200,6 +211,7 @@ enum BarMetric: String, CaseIterable {
         case .fan: return Self.fanValue(s)
         case .disk: return s.diskRead + s.diskWrite
         case .diskOps: return s.diskReadOps + s.diskWriteOps
+        case .net: return s.netIn + s.netOut
         }
     }
 
@@ -215,6 +227,7 @@ enum BarMetric: String, CaseIterable {
         case .fan: return max(100, a * 0.1)
         case .disk: return max(1, a * 0.25)
         case .diskOps: return max(100, a * 0.25)
+        case .net: return max(0.02, a * 0.25)
         }
     }
 
@@ -258,6 +271,19 @@ enum Fmt {
         guard v.isFinite else { return dash }
         if v >= 999.5 { return String(format: "%.1fG", v / 1000) }
         return v < 9.95 ? String(format: "%.1fM", v) : String(format: "%.0fM", v)
+    }
+    /// A network rate given in MB/s: "0", "14K", "1.2M", "120M", "1.1G".
+    static func netShort(_ v: Float) -> String {
+        guard v.isFinite else { return dash }
+        if v >= 0.9995 { return mbShort(v) }
+        let kb = (v * 1000).rounded()
+        return kb < 1 ? "0" : "\(Int(kb))K"
+    }
+    /// The same with its unit, for a chart's scale: "100 KB/s", "2.5 MB/s", "1.2 GB/s".
+    static func netRate(_ v: Float) -> String {
+        guard v.isFinite else { return dash }
+        if v >= 999.5 { return num(v / 1000) + " GB/s" }
+        return v >= 0.9995 ? num(v) + " MB/s" : "\(Int((v * 1000).rounded())) KB/s"
     }
     /// Operations per second: "730", "8.9k", "42k".
     static func ops(_ v: Float) -> String {

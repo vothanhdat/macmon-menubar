@@ -198,6 +198,9 @@ private final class LineReader {
             if fans.count > 1 { s.fan1 = fans[1].rpm ?? .nan }
             s.fanMax = fans.compactMap(\.max_rpm).max() ?? .nan
         }
+        // Bytes per second; missing before macmon 0.12, and the chart then shows no data.
+        s.netIn = j.net_in.map { Float($0 / 1e6) } ?? .nan
+        s.netOut = j.net_out.map { Float($0 / 1e6) } ?? .nan
         let disk = sensors.readDisk(now: s.time)
         s.diskRead = disk.read
         s.diskWrite = disk.write
@@ -239,4 +242,6 @@ private struct MacmonJSON: Decodable {
     let sys_power: Float?
     let temp: Temp?
     let fans: [Fan]?
+    let net_in: Double?
+    let net_out: Double?
 }

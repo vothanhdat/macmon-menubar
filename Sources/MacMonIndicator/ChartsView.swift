@@ -2,7 +2,7 @@ import AppKit
 
 /// Charts the user can show in the menu, in their chosen order.
 enum ChartID: String, CaseIterable {
-    case cpu, gpu, ram, power, battery, temp, fans, disk, diskOps
+    case cpu, gpu, ram, power, battery, temp, fans, disk, diskOps, network
 
     var title: String {
         switch self {
@@ -15,6 +15,7 @@ enum ChartID: String, CaseIterable {
         case .fans: return "Fans"
         case .disk: return "Disk"
         case .diskOps: return "Disk ops"
+        case .network: return "Network"
         }
     }
 }
@@ -1010,6 +1011,13 @@ extension ChartsView {
                            color: .systemBlue, color2: .systemPink) { v, _ in
                     ("R " + Fmt.ops(v(.diskReadOps)) + " · W " + Fmt.ops(v(.diskWriteOps)) + " ops/s", nil)
                 }.with(axis: { Fmt.ops($0) + " ops/s" })
+            case .network:
+                // Received on top, sent below, over Ethernet and Wi-Fi. Idle is a few KB/s, so
+                // the scale starts at 100 KB/s.
+                return Row(id: id, series: .netIn, shape: .mirrored(.netOut), scale: .auto(min: 0.1),
+                           color: .systemBlue, color2: .systemPink) { v, _ in
+                    ("↓ " + Fmt.netShort(v(.netIn)) + " · ↑ " + Fmt.netShort(v(.netOut)) + "/s", nil)
+                }.with(axis: Fmt.netRate)
             }
         }
     }

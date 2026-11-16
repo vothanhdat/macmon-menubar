@@ -154,7 +154,7 @@ private func check<T: Encodable>(_ value: T, _ file: String) throws {
         let o = ProcessTracker.Overview(hourly: true, starts: starts, programs: paths.map { ($0, [stats($0 == app ? 600 : 100), ProcStats()]) },
                                         total: [stats(701), ProcStats()], unseen: [ProcStats(cpu: 99), ProcStats()], awake: [300, 0])
         let c = try #require(TerminalServer.history(all, summary: summary, chart: .stack(o, pinned: nil)).chart)
-        #expect(c.metrics == ["CPU", "Energy", "Memory", "Disk"])
+        #expect(c.metrics == ["CPU", "Energy", "Memory", "Disk", "Network"])
         #expect(c.metric == 0)
         #expect(c.title == "All apps · per hour")
         #expect(c.path == nil)

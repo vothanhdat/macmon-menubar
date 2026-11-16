@@ -303,6 +303,7 @@
             <li><b>Hover</b> to read the value at any moment; <b>click a chart</b> to see it alone at full width.</li>
             <li><b>Top processes</b> by CPU, CPU time, RAM, disk and kernel time. Click a column for its top ten.</li>
             <li><b>Disk operations</b> per second: many small reads and writes can slow a Mac while the MB/s stay low.</li>
+            <li><b>Network</b> received and sent per second, over Ethernet and Wi-Fi.</li>
             <li>Keep it on screen in a resizable <b>dashboard window</b>.</li>
             <li>Sleep and time the app wasn't running show as gaps, not as zeros.</li>
           </ul>
@@ -325,7 +326,7 @@
             <ul class="chips">
               <li>Running time</li><li>Launches</li><li>Average lifetime</li><li>Copies at once</li>
               <li>CPU time</li><li>CPU energy</li><li>Average power</li>
-              <li>Average memory</li><li>Peak memory</li><li>Disk read</li><li>Disk written</li>
+              <li>Average memory</li><li>Peak memory</li><li>Disk read</li><li>Disk written</li><li>Network received</li><li>Network sent</li>
             </ul>
             <p class="eyebrow" style="margin-top: 22px">Over</p>
             <ul class="chips">
@@ -368,7 +369,7 @@
           <h2>Small enough to forget about</h2>
           <p>The sensors come from <a href="https://github.com/vladkens/macmon">macmon</a>, which needs no sudo. The app is AppKit only, draws its charts by hand, and redraws the menu bar only when a number has changed enough to matter.</p>
           <ul>
-            <li>History is one fixed-size file of about 248 KB. It never grows.</li>
+            <li>History is one fixed-size file of about 273 KB. It never grows.</li>
             <li>Process scanning for the menu runs only while the menu, the window or a terminal view is open.</li>
             <li>Sampling slows to every 10 s while the displays sleep, and stops during system sleep.</li>
             <li>An optional, read-only <b>root mode</b> adds disk use of system processes. Off by default.</li>

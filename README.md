@@ -33,9 +33,11 @@ _Screenshots use demo history and demo process names._
 - **Battery** charge/discharge watts, **disk** read/write throughput and **disk operations** per
   second. Many small reads or writes (a big `git status`, an indexer, a package install) can slow
   the whole Mac while the MB/s stay low; the **Disk ops** chart shows them.
+- **Network** received and sent per second, over Ethernet and Wi-Fi, as a chart and as a menu bar
+  value.
 - **Process History** (in the menu): every 5 minutes, in the background, the app adds up what each
   app and program used: running time, launches, average lifetime, copies running at once, CPU time,
-  CPU energy and average power, average and peak memory, disk read and written. Programs are kept by
+  CPU energy and average power, average and peak memory, disk read and written, network received and sent. Programs are kept by
   path, not pid, and an app's helper processes add up under the app (or see each executable). Pick
   Today, 24 hours, 7, 30 or 90 days; click a column to sort. It also shows how much of a battery
   charge each app's CPU work took, points out apps using far more CPU than they usually do (with a
@@ -139,7 +141,7 @@ macmon-indicator
   (`7d`, `30d`, `90d`), with seconds, joules and bytes as they are stored. Add `--json` for a JSON
   array instead. `kind` says what a row is: an `app` (all of its executables together), an
   `executable` (those inside an app are in the app's row too, so don't add the two up), or
-  `unseen`. What isn't known (energy and disk of system processes without root mode) is empty in
+  `unseen`. Network bytes are `net_in_bytes` and `net_out_bytes`. What isn't known (energy and disk of system processes without root mode) is empty in
   CSV and `null` in JSON. For example, the CPU energy per app over a week:
   `macmon-indicator --export --range 7d --json | jq 'map(select(.kind == "app")) | group_by(.name) | map({name: .[0].name, wh: (map(.energy_j // 0) | add / 3600)}) | sort_by(-.wh) | .[:10]'`
 - **Without logging in to a shell**: a command run by `ssh` doesn't load your shell profile, so
@@ -168,7 +170,8 @@ Measured on a MacBook Pro M4 Pro, on battery, 5 s interval, menu closed:
 |---|---|---|
 | MacMon Indicator | 0.2–0.4% | 11 MB (about 20 MB once the menu has been opened) |
 | macmon | 0.30% | 11 MB |
-| **Total** | **~0.5–0.7%** | **~22–31 MB** |
+| nettop and script (only with process history on) | 0.2% | 4 MB |
+| **Total** | **~0.7–0.9%** | **~26–35 MB** |
 
 At the default 2 s interval on power, expect roughly twice the CPU. While the menu is open, or the
 dashboard window can be seen, it samples every second and scans processes every 2 s: about 2% of
@@ -212,7 +215,7 @@ How it stays small:
   have been asleep for a minute, the app saves its history, launches a fresh copy of itself and
   quits. Nobody sees the menu bar item go and come back, and memory returns to launch level
   (about 11 MB footprint, 75 MB RSS). Turn it off with **Settings → Free memory while the display sleeps**.
-- **History is one fixed-size memory-mapped file** (~248 KB, never grows). Writing a sample is just a
+- **History is one fixed-size memory-mapped file** (~273 KB, never grows). Writing a sample is just a
   memory write, and the file is flushed once a minute.
 
 ## How it works
@@ -258,7 +261,7 @@ come from the scans.
   energy ÷ running time.
 - **Battery** (on Macs that have one) is the CPU energy a program used while the Mac ran on its
   battery, as a share of a full charge: 12% means it used about an eighth of a charge. It is
-  counted only since the version after 0.1.9 (older history shows 0%), by the power source at each scan, and like Energy it
+  counted only since 0.1.10 (older history shows 0%), by the power source at each scan, and like Energy it
   is CPU energy only: the display, the GPU and the rest of the Mac are not in it. A full charge is
   the battery's capacity now (its mAh at 3.8 V per cell).
 - **Unusual today**, under the table, lists apps whose CPU time today is far more than they
@@ -272,11 +275,19 @@ come from the scans.
   `git` and compiler runs the scans miss, under whatever started them (your shell, `make`). A child
   a scan did see also counts under its own name, so don't add Children to CPU time. Children still
   running, and ones the parent never waited for, aren't in it.
+- **Received** and **Sent** are the bytes a program moved over Wi-Fi and Ethernet, for every
+  process, also without root mode. macOS has no call an app may use for this, so the app runs
+  the system's `nettop` in the background while process history is on and reads it every 5
+  seconds (through `/usr/bin/script`, which gives it the terminal it needs and ends it when the
+  app ends). Loopback is left out, and traffic through a VPN counts for the VPN's process, not
+  for the app that sent it. What a process moves between its last reading and its end is missed.
+  A program that only ran between two scans can still have bytes here, with no running time.
+  Counted only since 0.1.10; older history shows 0.
 - **Chart** under the table, a column per hour (Today, 24 Hours) or per day, of CPU time, CPU
-  energy, memory or disk bytes written. With no row selected it stacks the programs with the most
+  energy, memory, disk bytes written or network bytes (received plus sent). With no row selected it stacks the programs with the most
   of that (up to 8, each at least 1% of the total; their colours are next to their names in the
   table), the rest as **Other**, and for CPU what no scan could place as **Unseen**. Select a row
-  for that program **Alone** (with its children's CPU time, peak memory or bytes read as a line) or
+  for that program **Alone** (with its children's CPU time, peak memory, bytes read or bytes sent as a line) or
   **With the rest** (its part of everything). Click the row again, or press Esc, for all programs.
   Point at a column for its numbers. Stacked memory is averaged over the whole hour or day, so the
   parts add up; a program alone shows its average while it was running.
@@ -332,11 +343,14 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
   process list can't show operations per process: macOS only reports bytes per process.
   Small files that are already in memory never reach the drive, so they don't count here; reading
   them shows up as CPU time instead.
+- **Network** counts Ethernet and Wi-Fi, received on top and sent below. Loopback and tunnels are
+  left out, so VPN traffic is counted once, on the interface that carries it. The numbers come
+  from macmon 0.12 or later (the bundled one is); with an older macmon the chart stays empty.
 - **Chart scales**: CPU and GPU use 0–100%, Temp 0–100°, RAM 0 to total, and Fans 0 to the fans'
-  top speed. Power, Battery, Disk and Disk ops go from 0 to a round number above the highest
-  value in view (Disk ops at least 1000); the disk charts scale reads (top half) and writes (bottom
-  half) separately. Small labels in the chart's corners show the scale of Power, Battery, Disk,
-  Disk ops and Fans. Turn on **Settings → Zoom Temp and RAM**
+  top speed. Power, Battery, Disk, Disk ops and Network go from 0 to a round number above the highest
+  value in view (Disk ops at least 1000, Network at least 100 KB/s); the disk and network charts
+  scale their top and bottom halves separately. Small labels in the chart's corners show the scale
+  of Power, Battery, Disk, Disk ops, Network and Fans. Turn on **Settings → Zoom Temp and RAM**
   to scale those two to the range their data covers; their labels then show the highest and lowest
   values in view. A dashed red line marks your warning limit whenever it falls inside the visible
   range.

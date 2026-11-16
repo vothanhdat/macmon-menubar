@@ -44,8 +44,8 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
 
     /// What the chart under the table shows.
     enum Metric: Int, CaseIterable {
-        case cpu, energy, memory, disk
-        var title: String { ["CPU", "Energy", "Memory", "Disk"][rawValue] }
+        case cpu, energy, memory, disk, network
+        var title: String { ["CPU", "Energy", "Memory", "Disk", "Network"][rawValue] }
     }
 
     struct Row {
@@ -115,11 +115,17 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
                text: { HistoryFmt.bytes($0.diskRead) }, value: { $0.diskRead }),
         Column(id: "diskWritten", title: "Written", width: 62, tip: "Bytes written to disk. System processes need the root helper.",
                text: { HistoryFmt.bytes($0.diskWritten) }, value: { $0.diskWritten }),
+        Column(id: "netIn", title: "Received", width: 66,
+               tip: "Bytes received over Wi-Fi and Ethernet, counted since 0.1.10. Traffic through a VPN counts for the VPN's process; loopback is left out.",
+               text: { HistoryFmt.bytes($0.s.netIn) }, value: { $0.s.netIn }),
+        Column(id: "netOut", title: "Sent", width: 58,
+               tip: "Bytes sent over Wi-Fi and Ethernet, counted since 0.1.10. Traffic through a VPN counts for the VPN's process; loopback is left out.",
+               text: { HistoryFmt.bytes($0.s.netOut) }, value: { $0.s.netOut }),
     ]
 
     init(tracker: ProcessTracker) {
         self.tracker = tracker
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 760),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1370, height: 760),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Process History"
         w.isReleasedWhenClosed = false
@@ -324,6 +330,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             case .energy: return s.energy
             case .memory: return s.ramTime
             case .disk: return s.diskWritten
+            case .network: return s.netIn + s.netOut
             }
         }
         let total = rows.reduce(0) { $0 + value($1.s) }
@@ -354,6 +361,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             case .energy: return s.energy
             case .memory: return o.awake[i] > 0 ? s.ramTime / o.awake[i] : 0
             case .disk: return s.diskWritten
+            case .network: return s.netIn + s.netOut
             }
         }
         var stack = o.programs.enumerated().map { k, p in
@@ -373,7 +381,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         switch metric {
         case .cpu: (format, top) = (Fmt.duration, ProcessHistoryChartView.roundUpTime)
         case .energy: (format, top) = (HistoryFmt.energy, { ProcessHistoryChartView.roundUp($0 / 3600) * 3600 })
-        case .memory, .disk: (format, top) = (HistoryFmt.bytes, ProcessHistoryChartView.roundUp)
+        case .memory, .disk, .network: (format, top) = (HistoryFmt.bytes, ProcessHistoryChartView.roundUp)
         }
         return .init(starts: o.starts, hourly: o.hourly, bars: [], barName: "", format: format, top: top, stack: stack)
     }
@@ -413,6 +421,11 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             m = .init(starts: starts, hourly: series.hourly, bars: values { $0.detail ? $0.diskWritten : nil }, barName: "Written",
                       line: values { $0.detail ? $0.diskRead : nil }, lineName: "Read", format: HistoryFmt.bytes,
                       top: ProcessHistoryChartView.roundUp)
+        case .network:
+            // A program that only ran between two scans has no running time, but can have bytes.
+            let moved: ((ProcStats) -> Double) -> [Double?] = { f in pts.map { $0.running > 0 || $0.netIn + $0.netOut > 0 ? f($0) : nil } }
+            m = .init(starts: starts, hourly: series.hourly, bars: moved { $0.netIn }, barName: "Received",
+                      line: moved { $0.netOut }, lineName: "Sent", format: HistoryFmt.bytes, top: ProcessHistoryChartView.roundUp)
         }
         return m.bars.contains { $0 != nil } ? m : nil
     }

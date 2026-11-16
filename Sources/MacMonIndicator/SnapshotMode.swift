@@ -104,6 +104,9 @@ enum SnapshotMode {
             // A burst of small-file reads every so often: many operations, few MB/s.
             d.diskReadOps = 20 + 300 * wave(t, 300) + (Int(t / 10) % 17 == 0 ? 7400 : 0)
             d.diskWriteOps = 60 + 250 * wave(t, 450) + (Int(t / 10) % 29 == 0 ? 1900 : 0)
+            // A download now and then; uploads stay small.
+            d.netIn = 0.02 + 0.4 * wave(t, 600) + (Int(t / 10) % 31 == 0 ? 12 : 0)
+            d.netOut = 0.01 + 0.08 * wave(t, 380) + (Int(t / 10) % 31 == 0 ? 0.6 : 0)
             h.add(d)
             t += now - t > 3600 ? 120 : 10
         }
@@ -289,11 +292,17 @@ enum SnapshotMode {
                                  HistoryFmt.bytes(t.detail ? t.diskRead : -1) as NSString,
                                  HistoryFmt.bytes(t.detail ? t.diskWritten : -1) as NSString))
                 }
+                print("network (Wi-Fi and Ethernet)     received      sent")
+                for p in execs.filter({ $0.stats.netIn + $0.stats.netOut > 0 })
+                    .sorted(by: { $0.stats.netIn + $0.stats.netOut > $1.stats.netIn + $1.stats.netOut }).prefix(8) {
+                    print(String(ProcKey.name(p.path).prefix(30)).padding(toLength: 30, withPad: " ", startingAt: 0) +
+                          String(format: " %9@ %9@", HistoryFmt.bytes(p.stats.netIn) as NSString, HistoryFmt.bytes(p.stats.netOut) as NSString))
+                }
                 let wc = ProcessHistoryWindowController(tracker: tracker)
                 let size = NSSize(width: 1180, height: 760)
                 wc.window?.setContentSize(size)
                 // MACMON_DEBUG_PROCESS_RANGE, MACMON_DEBUG_PROCESS_METRIC: which range (0–4) and
-                // chart (0–3) to show, on a kept file with more history than these few scans.
+                // chart (0–4) to show, on a kept file with more history than these few scans.
                 // MACMON_DEBUG_PROCESS_SELECT: 1 the first row alone, 2 with the rest (else all programs).
                 let env = ProcessInfo.processInfo.environment
                 let range = env["MACMON_DEBUG_PROCESS_RANGE"].flatMap(Int.init).flatMap(ProcessTracker.Range.init) ?? .today
@@ -456,6 +465,7 @@ enum SnapshotMode {
         s.sysPower = 9.1; s.cpuPower = 0.9; s.gpuPower = 0.2; s.batteryW = -7.9; s.batteryPct = 43
         s.cpuTemp = 42; s.gpuTemp = 41; s.fan0 = 0; s.fan1 = 0; s.fanMax = 5777; s.fanCount = 2
         s.diskRead = 0.1; s.diskWrite = 0.3; s.diskReadOps = 2; s.diskWriteOps = 96
+        s.netIn = 0.014; s.netOut = 0.006
         seedDemoHistory(history, like: s)
         history.add(s)
 
