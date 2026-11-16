@@ -1,0 +1,28 @@
+{
+  "columns" : [
+    "start",
+    "name",
+    "cpu_s",
+    "energy_j",
+    "launches"
+  ],
+  "kind" : "export",
+  "rows" : [
+    [
+      "2027-01-15T14:00:00+07:00",
+      "Tool, \"the\" one",
+      12.5,
+      null,
+      3
+    ],
+    [
+      "2027-01-15T15:00:00+07:00",
+      "node",
+      0.25,
+      40.5,
+      0
+    ]
+  ],
+  "tracking" : true,
+  "version" : 1
+}

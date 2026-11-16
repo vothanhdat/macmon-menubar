@@ -37,7 +37,10 @@ _Screenshots use demo history and demo process names._
   app and program used: running time, launches, average lifetime, copies running at once, CPU time,
   CPU energy and average power, average and peak memory, disk read and written. Programs are kept by
   path, not pid, and an app's helper processes add up under the app (or see each executable). Pick
-  Today, 24 hours, 7, 30 or 90 days; click a column to sort. See [Process history](#process-history).
+  Today, 24 hours, 7, 30 or 90 days; click a column to sort. It also shows how much of a battery
+  charge each app's CPU work took, points out apps using far more CPU than they usually do (with a
+  notification if you want one), and `macmon-indicator --export` gives the numbers as CSV or JSON.
+  See [Process history](#process-history).
 - **In a terminal, also over SSH**: `macmon-indicator` shows the same charts, top processes and
   process history in a terminal, from the app running on that Mac. See [In a terminal](#in-a-terminal-also-over-ssh).
 - **Optional root mode** to see disk use of system processes (Spotlight, Time Machine, …).
@@ -96,7 +99,7 @@ Other commands: `make app` (build only, into `build/`), `make run`, `make uninst
 - **Click** (left or right): the menu with charts, top processes, **Open in Window**, **Process History**, **About**, **Settings… (⌘,)** and **Quit (⌘Q)**. About shows the version and the macmon version in use.
 - **Settings**: menu bar slots, icons, one or two lines, text size, spacing, edge padding and opacity
   (the menu bar updates live while you drag), menu charts (which, order, columns, value position, height), update interval (on power / on battery), warning limits, launch at
-  login, free memory while the display sleeps, root mode, process history (on or off, clear), CSV export.
+  login, free memory while the display sleeps, root mode, process history (on or off, clear, notify about unusual CPU use), CSV export.
 
 ## In a terminal (also over SSH)
 
@@ -131,6 +134,14 @@ macmon-indicator
 - **Once**: `macmon-indicator --once` prints the readings and top processes and exits (also when the
   output isn't a terminal). Add `--history` for process history, `--range 1h` (or `today`, `7d`, …)
   for the range, or use `--json` for the app's full reply, for scripts. `--help` lists everything.
+- **Export**: `macmon-indicator --export` prints process history as numbers, for a spreadsheet or
+  a script: a CSV line per program per hour (`--range today`, the default, or `24h`) or per day
+  (`7d`, `30d`, `90d`), with seconds, joules and bytes as they are stored. Add `--json` for a JSON
+  array instead. `kind` says what a row is: an `app` (all of its executables together), an
+  `executable` (those inside an app are in the app's row too, so don't add the two up), or
+  `unseen`. What isn't known (energy and disk of system processes without root mode) is empty in
+  CSV and `null` in JSON. For example, the CPU energy per app over a week:
+  `macmon-indicator --export --range 7d --json | jq 'map(select(.kind == "app")) | group_by(.name) | map({name: .[0].name, wh: (map(.energy_j // 0) | add / 3600)}) | sort_by(-.wh) | .[:10]'`
 - **Without logging in to a shell**: a command run by `ssh` doesn't load your shell profile, so
   Homebrew's folder isn't on its PATH. Give the full path:
   `ssh mac-mini /opt/homebrew/bin/macmon-indicator --once`, or `ssh -t mac-mini /opt/homebrew/bin/macmon-indicator`
@@ -245,6 +256,17 @@ come from the scans.
   each one.
 - **Energy** is CPU energy as macOS counts it per process (GPU work isn't included). **Power** is
   energy ÷ running time.
+- **Battery** (on Macs that have one) is the CPU energy a program used while the Mac ran on its
+  battery, as a share of a full charge: 12% means it used about an eighth of a charge. It is
+  counted only since the version after 0.1.9 (older history shows 0%), by the power source at each scan, and like Energy it
+  is CPU energy only: the display, the GPU and the rest of the Mac are not in it. A full charge is
+  the battery's capacity now (its mAh at 3.8 V per cell).
+- **Unusual today**, under the table, lists apps whose CPU time today is far more than they
+  usually use: at least 10 minutes, 3 times their average day and 1.5 times their busiest day, of
+  the days they ran in the 14 before today (at least 3). Turn on **Notify when an app uses far
+  more CPU than usual** in Settings for a notification, once per app per day; clicking it opens
+  Process History. It's checked at each scan with two small queries, and off by default (macOS
+  asks whether the app may show notifications when you turn it on).
 - **Children** is the CPU time of the processes a program started that have ended, with theirs, as
   macOS counts it for the parent once it has collected them (`ri_child_*`). It catches the quick
   `git` and compiler runs the scans miss, under whatever started them (your shell, `make`). A child

@@ -57,6 +57,8 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         var cpuPct: Double { s.running > 0 ? s.cpu / s.running * 100 : 0 }
         var energy: Double { s.detail ? s.energy : -1 }
         var power: Double { s.detail && s.running > 0 ? s.energy / s.running : -1 }
+        /// CPU energy used on battery, in full charges (0.12: 12% of one). Negative: not known.
+        var battery: Double { s.detail ? s.batteryEnergy / 3600 / (Battery.capacityWh ?? .infinity) : -1 }
         var ramAvg: Double { s.running > 0 ? s.ramTime / s.running : 0 }
         var diskRead: Double { s.detail ? s.diskRead : -1 }
         var diskWritten: Double { s.detail ? s.diskWritten : -1 }
@@ -72,7 +74,10 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         let value: (Row) -> Double
     }
 
-    static let columns: [Column] = [
+    /// Battery only on a Mac that has one.
+    static let columns: [Column] = allColumns.filter { $0.id != "battery" || Battery.capacityWh != nil }
+
+    static let allColumns: [Column] = [
         Column(id: "name", title: "Name", width: 210, tip: "The app (all of its processes together) or the executable. Double-click to show it in Finder.",
                text: { $0.name }, value: { _ in 0 }),
         Column(id: "running", title: "Running", width: 72, tip: "How long at least one copy was running (while the Mac was awake)",
@@ -99,6 +104,9 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
                text: { HistoryFmt.energy($0.energy) }, value: { $0.energy }),
         Column(id: "power", title: "Power", width: 58, tip: "Average CPU power while running",
                text: { HistoryFmt.power($0.power) }, value: { $0.power }),
+        Column(id: "battery", title: "Battery", width: 58,
+               tip: "CPU energy used while on battery, as a share of a full charge\(Battery.capacityWh.map { String(format: " (about %.0f Wh)", $0) } ?? ""). The display, GPU and the rest of the Mac are not included. System processes need the root helper.",
+               text: { $0.battery >= 0 ? HistoryFmt.pct($0.battery * 100) : Fmt.dash }, value: { $0.battery }),
         Column(id: "ramAvg", title: "RAM avg", width: 62, tip: "Average memory while running, all copies together",
                text: { HistoryFmt.bytes($0.ramAvg) }, value: { $0.ramAvg }),
         Column(id: "ramPeak", title: "RAM peak", width: 66, tip: "Most memory seen at a scan, all copies together",
@@ -111,7 +119,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
 
     init(tracker: ProcessTracker) {
         self.tracker = tracker
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1240, height: 760),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Process History"
         w.isReleasedWhenClosed = false
@@ -491,6 +499,9 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         if empty {
             parts.append("Collecting: numbers appear after the second scan.")
         }
+        if !summary.unusual.isEmpty {
+            parts.append("Unusual today: " + summary.unusual.prefix(3).map(Self.unusualText).joined(separator: "; ") + ".")
+        }
         let partial = summary.programs.contains { !$0.stats.detail }
         switch summary.helper {
         case .outdated:
@@ -505,6 +516,11 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             break
         }
         return parts
+    }
+
+    /// "Spotlight 2h 10m of CPU time (usually 12m 00s a day)"
+    static func unusualText(_ u: ProcessTracker.Unusual) -> String {
+        "\(ProcKey.name(u.path)) \(Fmt.duration(u.today)) of CPU time (usually \(Fmt.duration(u.usual)) a day)"
     }
 
     // MARK: - Actions
@@ -634,7 +650,8 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         let unknown = col.value(r) < 0
         cell.textField?.textColor = unknown ? .tertiaryLabelColor : .labelColor
         cell.textField?.toolTip = col.id == "name" ? r.path : (col.id == "ramPeak" ? "Biggest single copy: \(HistoryFmt.bytes(r.s.ramOnePeak))" :
-            (col.id == "cpu" && r.s.detail ? "On performance cores: \(Fmt.duration(r.s.pcore))" : nil))
+            (col.id == "cpu" && r.s.detail ? "On performance cores: \(Fmt.duration(r.s.pcore))" :
+            (col.id == "battery" && r.s.detail ? "On battery: \(HistoryFmt.energy(r.s.batteryEnergy)) of \(HistoryFmt.energy(r.s.energy))" : nil)))
         return cell
     }
 }

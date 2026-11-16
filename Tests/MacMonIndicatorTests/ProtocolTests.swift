@@ -49,6 +49,11 @@ private let history = TerminalServer.History(
         totals: ["1h 00m", "48s"], line: TerminalServer.HistoryLine(name: "Peak", cells: ["1.2G", "–"]),
         notes: ["Running 42m 00s", ""]))
 
+private let export = TerminalServer.Export(
+    tracking: true, columns: ["start", "name", "cpu_s", "energy_j", "launches"],
+    rows: [["2027-01-15T14:00:00+07:00", #"Tool, "the" one"#, .number(12.5), .unknown, .count(3)],
+           ["2027-01-15T15:00:00+07:00", "node", .number(0.25), .number(40.5), .count(0)]])
+
 private func json(_ data: Data) throws -> NSObject {
     try #require(try JSONSerialization.jsonObject(with: data) as? NSObject)
 }
@@ -72,6 +77,15 @@ private func check<T: Encodable>(_ value: T, _ file: String) throws {
 @Suite struct ProtocolTests {
     @Test func liveReply() throws { try check(live, "live.json") }
     @Test func historyReply() throws { try check(history, "history.json") }
+    @Test func exportReply() throws { try check(export, "export.json") }
+
+    @Test func exportRequest() throws {
+        let data = try Data(contentsOf: fixtures.appendingPathComponent("request-export.json"))
+        let r = try JSONDecoder().decode(TerminalServer.Request.self, from: data)
+        #expect(r.cmd == .export)
+        #expect(r.range == 3)
+        #expect(try #require(try json(data) as? [String: Any]).keys.sorted() == ["cmd", "range"])
+    }
 
     @Test func repliesCarryTheVersion() throws {
         // The terminal view reads `version` first and stops when it isn't the one it knows.

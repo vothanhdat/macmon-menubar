@@ -40,6 +40,8 @@ Usage: macmon-indicator [options]
   --executables    process history by executable instead of by app
   --once           print once and exit (also when the output isn't a terminal)
   --json           print the app's reply as JSON and exit
+  --export         print process history as numbers and exit: a CSV line per program
+                   per hour (today, 24h) or day of --range; with --json, a JSON array
   -h, --help       this help
   -V, --version    the version
 
@@ -59,10 +61,11 @@ struct Opts {
     executables: bool,
     once: bool,
     json: bool,
+    export: bool,
 }
 
 fn parse() -> Result<Option<Opts>, String> {
-    let mut o = Opts { history: false, range: None, executables: false, once: false, json: false };
+    let mut o = Opts { history: false, range: None, executables: false, once: false, json: false, export: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -78,6 +81,7 @@ fn parse() -> Result<Option<Opts>, String> {
             "--executables" => o.executables = true,
             "--once" => o.once = true,
             "--json" => o.json = true,
+            "--export" => o.export = true,
             "--range" => o.range = Some(args.next().ok_or("--range needs a value")?),
             _ if a.starts_with("--range=") => o.range = Some(a["--range=".len()..].to_string()),
             _ => return Err(format!("unknown option: {a}")),
@@ -95,9 +99,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let list: &[&str] = if opts.history { &RANGES } else { &TIERS };
+    let history = opts.history || opts.export;
+    let list: &[&str] = if history { &RANGES } else { &TIERS };
     let index = match &opts.range {
-        None => if opts.history { 0 } else { 1 },
+        None => if history { 0 } else { 1 },
         Some(r) => match list.iter().position(|t| t.eq_ignore_ascii_case(r)) {
             Some(i) => i,
             None => {
@@ -106,6 +111,9 @@ fn main() -> ExitCode {
             }
         },
     };
+    if opts.export {
+        return export(index, opts.json);
+    }
     let view = if opts.history { View::History } else { View::Live };
     let mut app = App::new(view, if opts.history { 1 } else { index }, if opts.history { index } else { 0 });
     app.by_executable = opts.executables;
@@ -117,6 +125,32 @@ fn main() -> ExitCode {
     }
     style::set_mode(style::detect(true));
     interactive(app)
+}
+
+/// Prints process history over a range as numbers: CSV, or a JSON array.
+fn export(range: usize, json: bool) -> ExitCode {
+    let request = proto::Request { cmd: "export", range: Some(range), ..Default::default() };
+    let reply = match client::Client::connect().and_then(|mut c| c.request(&request)) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("macmon-indicator: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let e = match serde_json::from_str::<proto::Export>(&reply) {
+        Ok(e) if e.version == proto::VERSION && !e.columns.is_empty() => e,
+        _ => {
+            eprintln!("macmon-indicator: the running MacMon Indicator can't export (an older version?). Update and restart it.");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !e.tracking {
+        eprintln!("macmon-indicator: process history is off. Turn it on in Settings.");
+        return ExitCode::FAILURE;
+    }
+    let text = if json { e.json() } else { e.csv() };
+    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+    ExitCode::SUCCESS
 }
 
 /// Prints the view once. The app starts scanning processes when a terminal connects, and their

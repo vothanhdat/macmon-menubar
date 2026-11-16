@@ -204,6 +204,47 @@ pub struct HistoryRow {
     pub unknown: Vec<bool>,
 }
 
+/// Process history as numbers (`--export`): a value per column in each row, null where unknown.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Export {
+    pub version: u32,
+    pub tracking: bool,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+impl Export {
+    /// A header line and a line per row. Text with a comma, a quote or a line break is quoted.
+    pub fn csv(&self) -> String {
+        fn cell(v: &serde_json::Value) -> String {
+            match v {
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::String(s) if s.contains([',', '"', '\n', '\r']) => format!("\"{}\"", s.replace('"', "\"\"")),
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }
+        }
+        let mut out = self.columns.join(",");
+        out.push('\n');
+        for r in &self.rows {
+            out.push_str(&r.iter().map(cell).collect::<Vec<_>>().join(","));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// An array with an object per row, a row per line, the keys in the columns' order.
+    pub fn json(&self) -> String {
+        let rows: Vec<String> = self.rows.iter().map(|r| {
+            let fields: Vec<String> = self.columns.iter().zip(r)
+                .map(|(c, v)| format!("{}:{v}", serde_json::Value::String(c.clone()))).collect();
+            format!("{{{}}}", fields.join(","))
+        }).collect();
+        format!("[\n{}\n]\n", rows.join(",\n"))
+    }
+}
+
 /// Both sides of the protocol are tested against the files in Tests/protocol/ (see
 /// Tests/MacMonIndicatorTests/ProtocolTests.swift, which says how to update them):
 /// the replies there are what the app encodes, the requests what this program encodes.
@@ -215,6 +256,35 @@ mod tests {
     const HISTORY: &str = include_str!("../../Tests/protocol/history.json");
     const REQUEST_LIVE: &str = include_str!("../../Tests/protocol/request-live.json");
     const REQUEST_HISTORY: &str = include_str!("../../Tests/protocol/request-history.json");
+    const EXPORT: &str = include_str!("../../Tests/protocol/export.json");
+    const REQUEST_EXPORT: &str = include_str!("../../Tests/protocol/request-export.json");
+
+    #[test]
+    fn reads_and_writes_an_export() {
+        let e: Export = serde_json::from_str(EXPORT).unwrap();
+        assert_eq!(e.version, VERSION);
+        assert!(e.tracking);
+        assert_eq!(e.columns, ["start", "name", "cpu_s", "energy_j", "launches"]);
+        assert_eq!(e.rows.len(), 2);
+        assert_eq!(
+            e.csv(),
+            "start,name,cpu_s,energy_j,launches\n\
+             2027-01-15T14:00:00+07:00,\"Tool, \"\"the\"\" one\",12.5,,3\n\
+             2027-01-15T15:00:00+07:00,node,0.25,40.5,0\n"
+        );
+        assert_eq!(
+            e.json(),
+            "[\n\
+             {\"start\":\"2027-01-15T14:00:00+07:00\",\"name\":\"Tool, \\\"the\\\" one\",\"cpu_s\":12.5,\"energy_j\":null,\"launches\":3},\n\
+             {\"start\":\"2027-01-15T15:00:00+07:00\",\"name\":\"node\",\"cpu_s\":0.25,\"energy_j\":40.5,\"launches\":0}\n\
+             ]\n"
+        );
+        let v: serde_json::Value = serde_json::from_str(EXPORT).unwrap();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["columns", "kind", "rows", "tracking", "version"]);
+        let request = Request { cmd: "export", range: Some(3), ..Default::default() };
+        assert_eq!(serde_json::to_string(&request).unwrap(), REQUEST_EXPORT.trim_end());
+    }
 
     fn some(v: &[Option<f32>]) -> Option<Vec<Option<f32>>> {
         Some(v.to_vec())

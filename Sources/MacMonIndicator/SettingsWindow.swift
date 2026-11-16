@@ -7,6 +7,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     var macmonStatus: () -> String = { "" }
     var exportCSV: (() -> Void)?
     var clearProcessHistory: (() -> Void)?
+    /// Notifications about unusual CPU use were turned on.
+    var alertsEnabled: (() -> Void)?
 
     private let s = Settings.shared
     private var slotPopups: [NSPopUpButton] = []
@@ -37,6 +39,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let restartBox = NSButton(checkboxWithTitle: "Free memory while the display sleeps", target: nil, action: nil)
     private let rootBox = NSButton(checkboxWithTitle: "Show system processes (root helper)", target: nil, action: nil)
     private let historyBox = NSButton(checkboxWithTitle: "Keep process history", target: nil, action: nil)
+    private let unusualBox = NSButton(checkboxWithTitle: "Notify when an app uses far more CPU than usual", target: nil, action: nil)
     private let macmonLabel = NSTextField(wrappingLabelWithString: "")
     private let acChoices = [1000, 2000, 3000, 5000]
     private let batteryChoices = [2000, 5000, 10000]
@@ -234,6 +237,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         clear.bezelStyle = .rounded
         let historyRow = NSStackView(views: [historyBox, clear])
         historyRow.spacing = 12
+        unusualBox.state = s.notifyUnusual && s.trackProcesses ? .on : .off
+        unusualBox.isEnabled = s.trackProcesses
+        unusualBox.target = self
+        unusualBox.action = #selector(unusualChanged)
+        unusualBox.toolTip = "Once per app per day, when its CPU time today is at least 10 minutes, 3 times its daily average and 1.5 times its busiest day of the last 14. The Process History window shows the same under its table."
 
         macmonLabel.stringValue = macmonStatus()
         macmonLabel.font = .systemFont(ofSize: 11)
@@ -263,13 +271,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [NSGridCell.emptyContentView, note("Lets the process list show disk use of system processes such as Spotlight and Time Machine. Turning it on or off asks for your admin password. The helper is read-only and only runs while the menu is open, and briefly every 5 minutes for process history.")],
             [label("Processes", bold: true), historyRow],
             [NSGridCell.emptyContentView, note("Every 5 minutes, adds up each app's and program's running time, launches, CPU time, CPU energy, memory and disk use. Kept for 90 days on this Mac only. See it under Process History in the menu.")],
+            [NSGridCell.emptyContentView, unusualBox],
             [label("macmon", bold: true), macmonLabel],
             [NSGridCell.emptyContentView, export],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
-        for r in [0, 5, 9, 10, 12, 16, 18] { grid.row(at: r).yPlacement = .center }
+        for r in [0, 5, 9, 10, 12, 16, 19] { grid.row(at: r).yPlacement = .center }
         grid.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -392,7 +401,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func exportClicked() { exportCSV?() }
 
-    @objc private func historyChanged() { s.trackProcesses = historyBox.state == .on }
+    @objc private func historyChanged() {
+        s.trackProcesses = historyBox.state == .on
+        unusualBox.isEnabled = s.trackProcesses
+        if !s.trackProcesses { unusualBox.state = .off; s.notifyUnusual = false }
+    }
+
+    @objc private func unusualChanged() {
+        guard unusualBox.state == .on else { s.notifyUnusual = false; return }
+        UsageAlerts.shared.enable { [weak self] ok in
+            guard let self else { return }
+            self.s.notifyUnusual = ok
+            if ok {
+                self.alertsEnabled?()
+            } else {
+                self.unusualBox.state = .off
+                self.showAlert("Notifications are off for MacMon Indicator",
+                               "Allow them in System Settings › Notifications, then turn this on again.")
+            }
+        }
+    }
 
     @objc private func clearHistoryClicked() {
         let a = NSAlert()

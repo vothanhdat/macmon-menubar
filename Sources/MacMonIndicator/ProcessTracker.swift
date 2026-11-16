@@ -33,6 +33,21 @@ final class ProcessTracker {
         var helper = HelperState.notUsed
         /// The oldest data in the range (history may not reach back as far as the range).
         var since: Date?
+        /// Programs using far more CPU today than they usually do, as of the last scan.
+        var unusual: [Unusual] = []
+    }
+
+    /// A program that used far more CPU time today than on the days before.
+    struct Unusual: Equatable {
+        var path: String
+        var today: Double   // CPU seconds so far today
+        var usual: Double   // CPU seconds on an average day it ran, of the 14 before today
+    }
+
+    /// One row per program per hour or day, for `macmon-indicator --export`.
+    struct Export {
+        var hourly = true
+        var rows: [(start: Double, path: String, stats: ProcStats)] = []
     }
 
     /// One program over time: a point per hour (Today, 24 Hours) or per day.
@@ -61,8 +76,8 @@ final class ProcessTracker {
         .flatMap(Double.init).map { max(1, $0) } ?? 300
     static let unseenKey = "#unseen"
 
-    /// Called on the main queue after each scan.
-    var onScan: (() -> Void)?
+    /// Called on the main queue after each scan, with the programs using far more CPU than usual.
+    var onScan: (([Unusual]) -> Void)?
 
     /// Everything runs here. Not private: the tests run `record` and `summarize` on it.
     let queue = DispatchQueue(label: "MacMonIndicator.proctrack", qos: .utility)
@@ -80,6 +95,8 @@ final class ProcessTracker {
     private var current: [Int64: ProcStats] = [:]
     private var rolledUpTo: Int64 = 0   // start of the first day not yet added up into a daily row
     private var helper = HelperState.notUsed
+    private var unusual: [Unusual] = []
+    private var lastOnBattery = false
     private var paths: [pid_t: (start: Double, path: String)] = [:]
     private let me = getuid()
     private let host = mach_host_self()
@@ -127,6 +144,7 @@ final class ProcessTracker {
             self.current = [:]
             self.hour = 0
             self.rolledUpTo = 0
+            self.unusual = []
             DispatchQueue.main.async(execute: done)
         }
     }
@@ -306,14 +324,16 @@ final class ProcessTracker {
         let nowWall = Date().timeIntervalSince1970
         let nowUp = DispatchTime.now().uptimeNanoseconds
         let ticks = cpuTicks()
-        record(collect(now: nowWall), nowWall: nowWall, nowUp: nowUp, ticks: ticks)
-        DispatchQueue.main.async { [weak self] in self?.onScan?() }
+        record(collect(now: nowWall), nowWall: nowWall, nowUp: nowUp, ticks: ticks, onBattery: Battery.onBattery() ?? false)
+        let unusual = self.unusual
+        DispatchQueue.main.async { [weak self] in self?.onScan?(unusual) }
     }
 
     /// Adds one scan to the history: `procs` as read at `nowWall` (seconds since 1970) and `nowUp`
-    /// (uptime ns, which stops while asleep), with the whole Mac's busy CPU `ticks` then. Queue
-    /// only. The times are arguments so that the tests can run days of scans in a moment.
-    func record(_ procs: [pid_t: Seen], nowWall: Double, nowUp: UInt64, ticks: [UInt32]) {
+    /// (uptime ns, which stops while asleep), with the whole Mac's busy CPU `ticks` then, and
+    /// whether it ran on its battery. Queue only. The times are arguments so that the tests can
+    /// run days of scans in a moment.
+    func record(_ procs: [pid_t: Seen], nowWall: Double, nowUp: UInt64, ticks: [UInt32], onBattery: Bool = false) {
         guard store != nil else { return }
         let dt = lastUp > 0 && nowUp > lastUp ? Double(nowUp - lastUp) / 1e9 : 0
         // Nothing to measure against: the first scan, or after a long gap (the app wasn't running),
@@ -324,6 +344,9 @@ final class ProcessTracker {
                                                 fresh: fresh, keyID: keyID)
         var acc = stats
         if !fresh {
+            // On battery at both scans: all of the energy; at one of them: half.
+            let share = ((onBattery ? 0.5 : 0) + (lastOnBattery ? 0.5 : 0))
+            if share > 0 { for k in acc.keys { acc[k]!.batteryEnergy = acc[k]!.energy * share } }
             // CPU time no scan saw: the whole Mac's, minus what was found.
             if ticks.count == lastTicks.count, !ticks.isEmpty {
                 let busy = Double(zip(ticks, lastTicks).reduce(UInt64(0)) { $0 + UInt64($1.0 &- $1.1) }) / Double(sysconf(Int32(_SC_CLK_TCK)))
@@ -341,6 +364,34 @@ final class ProcessTracker {
         lastWall = nowWall
         lastUp = nowUp
         lastTicks = ticks
+        lastOnBattery = onBattery
+        if !fresh { unusual = unusualToday(now: nowWall) }
+    }
+
+    // MARK: - Unusual use
+
+    /// Far more than usual: at least 10 minutes of CPU time today, 3 times what it uses on an
+    /// average day, and half as much again as on its busiest day. `days`: the days it ran on, of
+    /// the 14 before today; with fewer than 3 nothing is usual yet.
+    static func isUnusual(today: Double, sum: Double, days: Int, most: Double) -> Bool {
+        days >= 3 && today >= 600 && today >= 3 * sum / Double(days) && today >= 1.5 * most
+    }
+
+    /// The programs (as the table lists them: apps, and executables outside any app) whose CPU
+    /// time today is far more than usual, the most first. Two small queries. Queue only.
+    func unusualToday(now: Double) -> [Unusual] {
+        guard let store else { return [] }
+        let today = Self.dayStart(now)
+        var cpu = store.cpu(span: 0, from: today, to: .max, excluding: hour).mapValues(\.sum)
+        if hour >= today { for (k, s) in current { cpu[k, default: 0] += s.cpu } }
+        let busy = cpu.filter { $0.value >= 600 }
+        guard !busy.isEmpty else { return [] }
+        let before = store.cpu(span: 1, from: Self.addDays(today, -14), to: today)
+        return busy.compactMap { key, used in
+            guard let b = before[key], Self.isUnusual(today: used, sum: b.sum, days: b.rows, most: b.most),
+                  let path = keyPaths[key], path != Self.unseenKey, ProcKey.isApp(path) || ProcKey.app(of: path) == nil else { return nil }
+            return Unusual(path: path, today: used, usual: b.sum / Double(b.rows))
+        }.sorted { $0.today / $0.usual != $1.today / $1.usual ? $0.today / $0.usual > $1.today / $1.usual : $0.path < $1.path }
     }
 
     /// Busy CPU ticks of the whole Mac (user, system, nice), all cores together.
@@ -462,6 +513,7 @@ final class ProcessTracker {
     /// Each program's totals over `range` ending at `now` (seconds since 1970). Queue only.
     func summarize(_ range: Range, now: Double) -> Summary {
         var result = Summary(lastScan: self.lastUp > 0 ? Date(timeIntervalSince1970: self.lastWall) : nil, helper: self.helper)
+        result.unusual = self.unusual
         guard let store = self.store else { return result }
         let today = Self.dayStart(now)
         let start = range == .last24h ? Self.hourStart(now) - 23 * 3600 : Self.addDays(today, -(range.days - 1))
@@ -519,6 +571,38 @@ final class ProcessTracker {
             while d <= today { buckets.append(d); d = addDays(d, 1) }
         }
         return (hourly, start, today, buckets)
+    }
+
+    /// Every program's row in each hour or day of `range`, on the main queue.
+    func export(_ range: Range, _ done: @escaping (Export) -> Void) {
+        queue.async {
+            let result = self.rows(range, now: Date().timeIntervalSince1970)
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+
+    /// Every program's row in each hour (Today, 24 Hours) or day of `range` ending at `now`:
+    /// apps, executables and the CPU no scan could place (`unseenKey`), oldest first. Queue only.
+    func rows(_ range: Range, now: Double) -> Export {
+        let (hourly, start, today, buckets) = Self.buckets(range, now: now)
+        var out = Export(hourly: hourly)
+        guard let store else { return out }
+        let wanted = Set(buckets)
+        var rows: [Int64: [Int64: ProcStats]] = [:]
+        func add(_ bucket: Int64, daily: Bool, _ key: Int64, _ s: ProcStats) {
+            let b = hourly || daily ? bucket : Self.dayStart(Double(bucket))
+            if wanted.contains(b) { rows[b, default: [:]][key, default: ProcStats()].add(s) }
+        }
+        // As in `summarize`: whole days from the daily rows, the rest from hours.
+        let hoursFrom = hourly ? start : max(start, min(rolledUpTo, today))
+        if !hourly { store.each(span: 1, from: start, to: hoursFrom) { add($0, daily: true, $1, $2) } }
+        store.each(span: 0, from: hoursFrom, to: .max) { b, k, s in if b != self.hour { add(b, daily: false, k, s) } }
+        if hour >= start { for (k, s) in current { add(hour, daily: false, k, s) } }
+        for b in buckets {
+            guard let r = rows[b] else { continue }
+            out.rows += r.compactMap { k, s in keyPaths[k].map { (Double(b), $0, s) } }.sorted { $0.1 < $1.1 }
+        }
+        return out
     }
 
     /// The programs at `paths` and all programs together over `range`, on the main queue.

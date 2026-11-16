@@ -158,7 +158,7 @@ final class TerminalServer {
     // MARK: - Messages
 
     struct Request: Decodable {
-        enum Command: String, Decodable { case live, history }
+        enum Command: String, Decodable { case live, history, export }
         let cmd: Command
         // live
         var tier: Int?          // HistoryStore.tiers index
@@ -166,7 +166,7 @@ final class TerminalServer {
         var sort: Int?          // ProcessListView.Sort raw value; none: the top few by each column
         var rows: Int?          // process rows
         // history
-        var range: Int?         // ProcessTracker.Range raw value
+        var range: Int?         // ProcessTracker.Range raw value (also for export)
         var byExecutable: Bool?
         var sortBy: String?     // column id
         var ascending: Bool?
@@ -287,6 +287,30 @@ final class TerminalServer {
         var path: String
         var cells: [String]
         var unknown: [Bool]         // the value can't be known (system processes without root)
+    }
+
+    /// Process history as numbers, for `macmon-indicator --export`: a row per program per hour or
+    /// day, each a value per column (null where it isn't known).
+    struct Export: Encodable {
+        var kind = "export"
+        var version = TerminalServer.version
+        var tracking: Bool
+        var columns: [String]
+        var rows: [[ExportValue]]
+    }
+
+    enum ExportValue: Encodable, ExpressibleByStringLiteral {
+        case text(String), number(Double), count(Int), unknown
+        init(stringLiteral value: String) { self = .text(value) }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.singleValueContainer()
+            switch self {
+            case .text(let s): try c.encode(s)
+            case .number(let n): try c.encode(n)
+            case .count(let n): try c.encode(n)
+            case .unknown: try c.encodeNil()
+            }
+        }
     }
 
     static func encode<T: Encodable>(_ value: T) -> Data {
@@ -490,6 +514,37 @@ extension TerminalServer {
                        },
                        footer: footer,
                        chart: summary.flatMap { s in data.map { chart(req, summary: s, data: $0) } })
+    }
+
+    static let exportColumns = [
+        "start", "span", "kind", "name", "path", "running_s", "copy_time_s", "peak_copies", "launches", "exits", "lifetime_s",
+        "cpu_s", "pcore_s", "child_cpu_s", "energy_j", "battery_energy_j", "ram_avg_bytes", "ram_peak_bytes", "ram_one_peak_bytes",
+        "disk_read_bytes", "disk_written_bytes",
+    ]
+
+    /// Every program's numbers in each hour or day, as stored (seconds, joules, bytes). `kind`:
+    /// "app" (all of its executables together, which are also listed), "executable", or "unseen"
+    /// (CPU no scan could place). Nil: process history is off.
+    static func export(_ data: ProcessTracker.Export?) -> Export {
+        guard let data else { return Export(tracking: false, columns: exportColumns, rows: []) }
+        let time = ISO8601DateFormatter()
+        time.timeZone = .current
+        var starts: [Double: String] = [:]
+        return Export(tracking: true, columns: exportColumns, rows: data.rows.map { r in
+            let s = r.stats
+            let unseen = r.path == ProcessTracker.unseenKey
+            let start = starts[r.start] ?? time.string(from: Date(timeIntervalSince1970: r.start))
+            starts[r.start] = start
+            func detail(_ v: Double) -> ExportValue { s.detail ? .number(v) : .unknown }
+            return [
+                .text(start), data.hourly ? "hour" : "day", unseen ? "unseen" : (ProcKey.isApp(r.path) ? "app" : "executable"),
+                .text(unseen ? "Unseen" : ProcKey.name(r.path)), .text(unseen ? "" : r.path),
+                .number(s.running), .number(s.copyTime), .count(s.peakCopies), .count(s.launches), .count(s.exits), .number(s.lifetime),
+                .number(s.cpu), detail(s.pcore), detail(s.childCpu), detail(s.energy), detail(s.batteryEnergy),
+                .number(s.running > 0 ? s.ramTime / s.running : 0), .number(s.ramPeak), .number(s.ramOnePeak),
+                detail(s.diskRead), detail(s.diskWritten),
+            ]
+        })
     }
 
     private static func finite(_ v: Float) -> Float? { v.isFinite ? v : nil }

@@ -30,6 +30,7 @@ final class Settings {
             "useRootHelper": false,
             "quietRestart": true,
             "trackProcesses": true,
+            "notifyUnusual": false,
         ])
         showNewCharts()
     }
@@ -147,6 +148,11 @@ final class Settings {
     var trackProcesses: Bool {
         get { d.bool(forKey: "trackProcesses") }
         set { d.set(newValue, forKey: "trackProcesses"); notify() }
+    }
+    /// Notify when a program uses far more CPU than it usually does (needs process history).
+    var notifyUnusual: Bool {
+        get { d.bool(forKey: "notifyUnusual") }
+        set { d.set(newValue, forKey: "notifyUnusual"); notify() }
     }
     var macmonPath: String? {
         get { d.string(forKey: "macmonPath") }

@@ -40,6 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         history = HistoryStore(directory: dir)
         historyDir = dir
         updateProcessTracker()
+        if Settings.shared.notifyUnusual {
+            UsageAlerts.shared.onOpen = { [weak self] in self?.openProcessHistory() }
+            UsageAlerts.shared.listen()
+        }
         startTerminalServer()
         menu.delegate = self
         menu.autoenablesItems = false
@@ -299,6 +303,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     req, history: self.history, latest: self.latest, hasBattery: self.macmon.hasBattery,
                     intervalMs: self.macmon.intervalMs, problem: problem, processes: self.lastProcesses,
                     processHistory: self.processTracker != nil)))
+            case .export:
+                guard let tracker = self.processTracker else {
+                    reply(TerminalServer.encode(TerminalServer.export(nil)))
+                    return
+                }
+                tracker.export(ProcessTracker.Range(rawValue: req.range ?? 0) ?? .today) {
+                    reply(TerminalServer.encode(TerminalServer.export($0)))
+                }
             case .history:
                 guard let tracker = self.processTracker else {
                     reply(TerminalServer.encode(TerminalServer.history(req, summary: nil)))
@@ -332,7 +344,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Settings.shared.trackProcesses {
             guard processTracker == nil else { return }
             let t = ProcessTracker(directory: historyDir)
-            t.onScan = { [weak self] in self?.processHistoryWindow?.reload() }
+            t.onScan = { [weak self] unusual in
+                self?.processHistoryWindow?.reload()
+                if Settings.shared.notifyUnusual { UsageAlerts.shared.post(unusual) }
+            }
             t.start()
             processTracker = t
         } else if let t = processTracker {
@@ -464,6 +479,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             wc.macmonStatus = { [weak self] in self?.macmonStatusText() ?? "" }
             wc.exportCSV = { [weak self] in self?.exportCSV() }
             wc.clearProcessHistory = { [weak self] in self?.clearProcessHistory() }
+            wc.alertsEnabled = { [weak self] in
+                UsageAlerts.shared.onOpen = { [weak self] in self?.openProcessHistory() }
+                UsageAlerts.shared.listen()
+            }
             wc.onClose = { [weak self] in self?.settingsWindow = nil }
             settingsWindow = wc
         }

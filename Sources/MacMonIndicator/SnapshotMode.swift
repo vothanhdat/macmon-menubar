@@ -317,7 +317,7 @@ enum SnapshotMode {
                 }
             }
         }
-        func onScan() {
+        func onScan(_ unusual: [ProcessTracker.Unusual]) {
             scans += 1
             print("scan \(scans)")
             if scans == 3 {
