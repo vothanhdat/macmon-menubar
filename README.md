@@ -30,7 +30,7 @@ _Screenshots use demo history and demo process names._
   to keep the charts and processes on screen. Resize it and the charts grow and the process list
   shows up to 20 rows. It reopens where you left it, also after login. While it's open the app
   shows in the Dock and ⌘-Tab; close it and the app goes back to the menu bar only.
-- **Battery** charge/discharge watts, **disk** read/write throughput and **disk operations** per
+- **Battery** charge/discharge watts and level, **disk** read/write throughput and **disk operations** per
   second. Many small reads or writes (a big `git status`, an indexer, a package install) can slow
   the whole Mac while the MB/s stay low; the **Disk ops** chart shows them.
 - **Network** received and sent per second, over Ethernet and Wi-Fi, as a chart and as a menu bar
@@ -337,7 +337,8 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
   (for a slow disk, say) isn't CPU time and doesn't count.
 - **GPU %** is frequency-weighted, as macmon reports it.
 - **Temperatures** are macmon's CPU/GPU averages. **Power** "System" is the whole machine.
-- **Battery** is + when charging and − when discharging.
+- **Battery** is + when charging and − when discharging. **Battery level** charts the charge
+  over time (0–100%), with the watts beside it.
 - **Disk** totals include every block device (internal and external). **Disk ops** counts the
   read and write operations the drives carry out; idle is usually well under 1000 per second. The
   process list can't show operations per process: macOS only reports bytes per process.
@@ -346,7 +347,7 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 - **Network** counts Ethernet and Wi-Fi, received on top and sent below. Loopback and tunnels are
   left out, so VPN traffic is counted once, on the interface that carries it. The numbers come
   from macmon 0.12 or later (the bundled one is); with an older macmon the chart stays empty.
-- **Chart scales**: CPU and GPU use 0–100%, Temp 0–100°, RAM 0 to total, and Fans 0 to the fans'
+- **Chart scales**: CPU, GPU and Battery level use 0–100%, Temp 0–100°, RAM 0 to total, and Fans 0 to the fans'
   top speed. Power, Battery, Disk, Disk ops and Network go from 0 to a round number above the highest
   value in view (Disk ops at least 1000, Network at least 100 KB/s); the disk and network charts
   scale their top and bottom halves separately. Small labels in the chart's corners show the scale

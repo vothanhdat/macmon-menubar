@@ -2,7 +2,8 @@ import AppKit
 
 /// Charts the user can show in the menu, in their chosen order.
 enum ChartID: String, CaseIterable {
-    case cpu, gpu, ram, power, battery, temp, fans, disk, diskOps, network
+    // New charts go at the end: Settings shows them once to people who already chose theirs.
+    case cpu, gpu, ram, power, battery, temp, fans, disk, diskOps, network, batteryLevel
 
     var title: String {
         switch self {
@@ -16,6 +17,7 @@ enum ChartID: String, CaseIterable {
         case .disk: return "Disk"
         case .diskOps: return "Disk ops"
         case .network: return "Network"
+        case .batteryLevel: return "Battery level"
         }
     }
 }
@@ -1018,6 +1020,12 @@ extension ChartsView {
                            color: .systemBlue, color2: .systemPink) { v, _ in
                     ("↓ " + Fmt.netShort(v(.netIn)) + " · ↑ " + Fmt.netShort(v(.netOut)) + "/s", nil)
                 }.with(axis: Fmt.netRate)
+            case .batteryLevel:
+                // The charge over time, 0–100%, with the charge/discharge watts beside it.
+                guard hasBattery else { return nil }
+                return Row(id: id, series: .batteryPct, shape: .up, scale: .fixed(100), color: .systemGreen, color2: nil) { v, _ in
+                    (Fmt.pct(v(.batteryPct)), Fmt.signedWatts(v(.batteryW)))
+                }.with(axis: Fmt.pct)
             }
         }
     }

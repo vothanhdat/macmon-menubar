@@ -95,6 +95,9 @@ enum SnapshotMode {
             d.cpuPower = 0.5 + 20 * busy
             d.gpuPower = 0.2 + 8 * wave(t, 2000) * wave(t, 700)
             d.batteryW = -(d.sysPower)
+            // Down over a working day, charged back up overnight.
+            let day = (t.truncatingRemainder(dividingBy: 86400)) / 86400
+            d.batteryPct = Float(day < 0.7 ? 100 - 75 * day / 0.7 : 25 + 75 * (day - 0.7) / 0.3)
             d.cpuTemp = 40 + 45 * busy
             d.gpuTemp = 38 + 30 * wave(t, 2000)
             d.fan0 = busy > 0.55 ? 1800 + 3000 * (busy - 0.55) : 0
