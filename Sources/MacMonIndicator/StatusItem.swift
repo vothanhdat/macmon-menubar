@@ -11,6 +11,8 @@ final class StatusItemController {
     private var appearanceObservation: NSKeyValueObservation?
     private var renderedDark = false
     private var renderedTemplate = true
+    private let tip = TipOwner()
+    private var tipRect = NSRect.null
 
     private func isDark(_ view: NSView) -> Bool {
         view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -85,8 +87,22 @@ final class StatusItemController {
             image = renderer.image(cells: cells, template: template)
         }
         button.image = image
-        button.toolTip = zip(renderer.metrics, cells).map { "\($0.title): \($1.text)" }.joined(separator: "\n")
+        tip.text = zip(renderer.metrics, cells).map { "\($0.title): \($1.text)" }.joined(separator: "\n")
+        // Registered once per size, not per value: see TipOwner.
+        if button.bounds != tipRect {
+            tipRect = button.bounds
+            button.removeAllToolTips()
+            button.addToolTip(tipRect, owner: tip, userData: nil)
+        }
     }
+}
+
+/// Gives the tooltip its text at the moment macOS shows it. Setting `button.toolTip` on every new
+/// value registers the tooltip again each time; when that happens while one is on screen or about
+/// to appear, macOS loses track of the mouse leaving and the tooltip stays until the next hover.
+private final class TipOwner: NSObject, NSViewToolTipOwner {
+    var text = ""
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String { text }
 }
 
 /// How the menu bar item looks. Adjustable in Settings.

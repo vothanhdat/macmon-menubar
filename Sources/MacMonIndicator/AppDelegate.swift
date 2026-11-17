@@ -368,9 +368,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 self.processHistoryWindow = wc
             }
-            self.activate()
             self.processHistoryWindow?.showWindow(nil)
-            self.processHistoryWindow?.window?.makeKeyAndOrderFront(nil)
+            self.bringToFront(self.processHistoryWindow?.window)
         }
     }
 
@@ -400,9 +399,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             UserDefaults.standard.set(true, forKey: Self.windowOpenKey)
             NSApp.setActivationPolicy(.regular)
         }
-        if activate { self.activate() }
         dashboardWindow?.showWindow(nil)
-        if dashboardWindow?.window?.isMiniaturized == true { dashboardWindow?.window?.deminiaturize(nil) }
+        if activate { bringToFront(dashboardWindow?.window) }
         dashboardWindow?.updateVisible()
     }
 
@@ -474,6 +472,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openSettings() {
+        menu.cancelTracking()
+        DispatchQueue.main.async { [weak self] in self?.showSettings() }
+    }
+
+    private func showSettings() {
         if settingsWindow == nil {
             let wc = SettingsWindowController()
             wc.macmonStatus = { [weak self] in self?.macmonStatusText() ?? "" }
@@ -486,9 +489,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             wc.onClose = { [weak self] in self?.settingsWindow = nil }
             settingsWindow = wc
         }
-        activate()
         settingsWindow?.showWindow(nil)
-        settingsWindow?.window?.makeKeyAndOrderFront(nil)
+        bringToFront(settingsWindow?.window)
     }
 
     private func exportCSV() {
@@ -508,6 +510,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func activate() {
         if #available(macOS 14, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
+    }
+
+    /// Puts a window that may already be open (behind other apps, or minimized) in front.
+    /// Since macOS 14 activation is only a request the frontmost app may turn down, which leaves
+    /// an already open window behind; ordering it front regardless puts it on top either way.
+    private func bringToFront(_ window: NSWindow?) {
+        guard let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        activate()
+        window.orderFrontRegardless()
+        window.makeKey()
     }
 }
 
