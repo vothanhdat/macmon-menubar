@@ -350,7 +350,7 @@ sudo rm -f /Library/LaunchDaemons/local.MacMonIndicator.helper.plist /Library/Pr
 - **Chart scales**: CPU, GPU and Battery level use 0–100%, Temp 0–100°, RAM 0 to total, and Fans 0 to the fans'
   top speed. Power, Battery, Disk, Disk ops and Network go from 0 to a round number above the highest
   value in view (Disk ops at least 1000, Network at least 100 KB/s); the disk and network charts
-  scale their top and bottom halves separately. Small labels in the chart's corners show the scale
+  use one scale for their top and bottom halves, so equal heights mean equal amounts. Small labels in the chart's corners show the scale
   of Power, Battery, Disk, Disk ops, Network and Fans. Turn on **Settings → Zoom Temp and RAM**
   to scale those two to the range their data covers; their labels then show the highest and lowest
   values in view. A dashed red line marks your warning limit whenever it falls inside the visible

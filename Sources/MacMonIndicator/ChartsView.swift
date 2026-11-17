@@ -304,10 +304,14 @@ final class ChartsView: NSView {
             if case .mirrored(let down) = row.shape {
                 history.window(tier: tier, series: down, now: now, avg: &avgBuf2, max: &maxBuf2)
             }
-            let r = range(row)
-            // The lower half of a mirrored chart (disk writes) has its own scale.
+            var r = range(row)
+            // Both halves of a mirrored chart (reads and writes, received and sent) share one
+            // scale, the larger of the two, so bars of the same height mean the same amount.
             var lowerHi = r.hi
-            if case .mirrored = row.shape { lowerHi = range(row, lowerHalf: true).hi }
+            if case .mirrored = row.shape {
+                r.hi = max(r.hi, range(row, lowerHalf: true).hi)
+                lowerHi = r.hi
+            }
             let limit = row.limit?(thresholds, latest)
             /// The bars, or with `backing` only the white backing under them.
             func bars(backing: Bool) {

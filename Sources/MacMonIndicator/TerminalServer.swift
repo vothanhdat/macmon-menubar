@@ -365,8 +365,10 @@ extension TerminalServer {
             case .mirrored(let down):
                 c.shape = "mirrored"
                 history.window(tier: tier, series: down, now: now, avg: &avg2, max: &mx2)
+                // One scale for both halves, as in the menu.
                 let r2 = ChartsView.range(row.scale, avg2, mx2, latest: latest, fit: fit)
-                c.lo2 = r2.lo; c.hi2 = r2.hi
+                c.hi = max(r.hi, r2.hi)
+                c.lo2 = r2.lo; c.hi2 = c.hi
                 c.avg2 = downsample(avg2, points, max: false)
                 c.max2 = downsample(mx2, points, max: true)
             }
