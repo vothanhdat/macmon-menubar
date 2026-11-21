@@ -94,10 +94,28 @@ final class HistoryStore {
         }
     }
 
+    /// A read-only copy of a history file, e.g. another Mac's (see OtherMacs.swift). It lives in
+    /// memory and is never written back. A file from another version is read as on an update.
+    /// Nil when the data isn't a complete history file.
+    init?(copy data: Data) {
+        guard let layout = Layout.read(from: data) else { return nil }
+        base = UnsafeMutableRawPointer.allocate(byteCount: Self.fileSize, alignment: 16)
+        mapped = false
+        if layout == Self.layout {
+            data.withUnsafeBytes { _ = memcpy(base, $0.baseAddress!, Self.fileSize) }
+        } else {
+            reset()
+            migrate(from: data, layout: layout, quiet: true)
+        }
+    }
+
+    /// The whole file as it is now, for sharing a copy.
+    func fileData() -> Data { Data(bytes: base, count: Self.fileSize) }
+
     /// Copies every tier that exists in both layouts (same bucket and capacity) from an old file.
     /// Series are only ever appended, so the old file's series are the first ones here; series it
     /// doesn't have start empty (and series it has beyond ours, from a newer version, are dropped).
-    private func migrate(from old: Data, layout ol: Layout) {
+    private func migrate(from old: Data, layout ol: Layout, quiet: Bool = false) {
         let n = Self.nSeries, on = ol.nSeries, common = min(n, on)
         var copied: [String] = []
         old.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
@@ -114,10 +132,13 @@ final class HistoryStore {
             }
         }
         flush(sync: true)
-        log.notice("history file layout changed (\(on) → \(n) series); kept tiers: \(copied.joined(separator: ", "), privacy: .public)")
+        if !quiet { log.notice("history file layout changed (\(on) → \(n) series); kept tiers: \(copied.joined(separator: ", "), privacy: .public)") }
     }
 
-    deinit { flush(sync: true) }
+    deinit {
+        flush(sync: true)
+        if mapped { munmap(base, Self.fileSize) } else { base.deallocate() }
+    }
 
     // MARK: - Layout helpers
 

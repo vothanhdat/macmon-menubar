@@ -16,6 +16,8 @@ final class ProcessListView: NSView {
     var rowCount = ProcessListView.defaultRows { didSet { if rowCount != oldValue { recompute() } } }
 
     var snapshot: ProcSnapshot? { didSet { recompute() } }
+    /// Shown under the table instead of what the snapshot says (another Mac's copy: when it was taken).
+    var note: String? { didSet { if note != oldValue { needsDisplay = true } } }
     var sort: Sort? {
         didSet {
             UserDefaults.standard.set(sort.map { $0.rawValue } ?? -1, forKey: "processSort")
@@ -171,7 +173,7 @@ final class ProcessListView: NSView {
             }
         }
 
-        let note = Self.note(snapshot)
+        let note = self.note ?? Self.note(snapshot)
         if !note.isEmpty {
             (note as NSString).draw(in: NSRect(x: inset, y: Self.headerH + Self.rowH * CGFloat(rowCount) + 2,
                                                width: bounds.width - inset * 2, height: Self.noteH),

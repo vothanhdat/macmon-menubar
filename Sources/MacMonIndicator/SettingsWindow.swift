@@ -9,6 +9,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     var clearProcessHistory: (() -> Void)?
     /// Notifications about unusual CPU use were turned on.
     var alertsEnabled: (() -> Void)?
+    /// Your other Macs that share (OtherMacs.swift), and how old their copies are.
+    var otherMacs: () -> [(id: String, name: String, status: String)] = { [] }
+    var forgetMac: ((String) -> Void)?
 
     private let s = Settings.shared
     private var slotPopups: [NSPopUpButton] = []
@@ -40,6 +43,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let rootBox = NSButton(checkboxWithTitle: "Show system processes (root helper)", target: nil, action: nil)
     private let historyBox = NSButton(checkboxWithTitle: "Keep process history", target: nil, action: nil)
     private let unusualBox = NSButton(checkboxWithTitle: "Notify when an app uses far more CPU than usual", target: nil, action: nil)
+    private let shareBox = NSButton(checkboxWithTitle: "Share with my other Macs through iCloud Drive", target: nil, action: nil)
+    private let macsPopup = NSPopUpButton()
+    private let forgetButton = NSButton(title: "Forget…", target: nil, action: nil)
+    private var macIDs: [String] = []
     private let macmonLabel = NSTextField(wrappingLabelWithString: "")
     private let acChoices = [1000, 2000, 3000, 5000]
     private let batteryChoices = [2000, 5000, 10000]
@@ -243,6 +250,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         unusualBox.action = #selector(unusualChanged)
         unusualBox.toolTip = "Once per app per day, when its CPU time today is at least 10 minutes, 3 times its daily average and 1.5 times its busiest day of the last 14. The Process History window shows the same under its table."
 
+        shareBox.state = s.shareWithOtherMacs ? .on : .off
+        shareBox.target = self
+        shareBox.action = #selector(shareChanged)
+        // Without iCloud Drive there is nothing to turn on; turning it off still works.
+        let haveDrive = OtherMacs.folder != nil
+        shareBox.isEnabled = haveDrive || s.shareWithOtherMacs
+        forgetButton.bezelStyle = .rounded
+        forgetButton.target = self
+        forgetButton.action = #selector(forgetClicked)
+        macsPopup.controlSize = .small
+        let macsRow = NSStackView(views: [macsPopup, forgetButton])
+        macsRow.spacing = 8
+        otherMacsChanged()
+
         macmonLabel.stringValue = macmonStatus()
         macmonLabel.font = .systemFont(ofSize: 11)
         macmonLabel.textColor = .secondaryLabelColor
@@ -272,13 +293,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             [label("Processes", bold: true), historyRow],
             [NSGridCell.emptyContentView, note("Every 5 minutes, adds up each app's and program's running time, launches, CPU time, CPU energy, memory and disk use. Kept for 90 days on this Mac only. See it under Process History in the menu.")],
             [NSGridCell.emptyContentView, unusualBox],
+            [label("Other Macs", bold: true), shareBox],
+            [NSGridCell.emptyContentView, note((haveDrive ? "" : "iCloud Drive is off on this Mac. ") + "Every hour, and before this Mac sleeps, puts a copy of its charts and top processes in iCloud Drive (folder MacMon Indicator). Your other Macs with this on show above the menu's charts; looking at one whose copy is older than 5 minutes asks it for the latest. Turning it off removes this Mac's copy.")],
+            [NSGridCell.emptyContentView, macsRow],
             [label("macmon", bold: true), macmonLabel],
             [NSGridCell.emptyContentView, export],
         ])
         grid.rowSpacing = 8
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .trailing
-        for r in [0, 5, 9, 10, 12, 16, 19] { grid.row(at: r).yPlacement = .center }
+        for r in [0, 5, 9, 10, 12, 16, 19, 22] { grid.row(at: r).yPlacement = .center }
         grid.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -420,6 +444,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                                "Allow them in System Settings › Notifications, then turn this on again.")
             }
         }
+    }
+
+    @objc private func shareChanged() {
+        s.shareWithOtherMacs = shareBox.state == .on
+        otherMacsChanged()
+    }
+
+    /// The other Macs, to forget one. Called when they change.
+    func otherMacsChanged() {
+        let macs = s.shareWithOtherMacs ? otherMacs() : []
+        macIDs = macs.map(\.id)
+        macsPopup.removeAllItems()
+        if macs.isEmpty {
+            macsPopup.addItem(withTitle: s.shareWithOtherMacs ? "No other Macs yet" : "Not sharing")
+        } else {
+            for m in macs { macsPopup.addItem(withTitle: m.status.isEmpty ? m.name : "\(m.name) (\(m.status))") }
+        }
+        macsPopup.isEnabled = !macs.isEmpty
+        forgetButton.isEnabled = !macs.isEmpty
+    }
+
+    @objc private func forgetClicked() {
+        let i = macsPopup.indexOfSelectedItem
+        guard i >= 0, i < macIDs.count, let name = otherMacs().first(where: { $0.id == macIDs[i] })?.name else { return }
+        let a = NSAlert()
+        a.messageText = "Forget \(name)?"
+        a.informativeText = "This removes its copy from iCloud Drive. If that Mac still shares, it shows again after its next update; turn sharing off on it to stop that."
+        a.addButton(withTitle: "Forget")
+        a.addButton(withTitle: "Cancel")
+        a.buttons.first?.hasDestructiveAction = true
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        forgetMac?(macIDs[i])
     }
 
     @objc private func clearHistoryClicked() {

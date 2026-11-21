@@ -33,6 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var terminalClients = 0
     private var restartWork: DispatchWorkItem?
     private var launchRSS: UInt64 = 0
+    /// Your other Macs through iCloud Drive, while Settings has it on (OtherMacs.swift).
+    private var otherMacs: OtherMacs?
+    /// A short process scan for what OtherMacs publishes, while the menu and window don't scan.
+    private var shareScan: ProcessMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -45,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             UsageAlerts.shared.listen()
         }
         startTerminalServer()
+        updateOtherMacs()
         menu.delegate = self
         menu.autoenablesItems = false
         buildMainMenu()
@@ -68,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.macmon.setInterval(self.desiredInterval())
             self.dashboardWindow?.settingsChanged()
             self.updateProcessTracker()
+            self.updateOtherMacs()
         }
         let ws = NSWorkspace.shared.notificationCenter
         ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -75,11 +81,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.macmon.stop()
             self?.history.flush(sync: true)
             self?.processTracker?.save()
+            self?.otherMacs?.publishNow()
         }
         ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             log.notice("system woke: starting macmon")
             self.macmon.start(intervalMs: self.desiredInterval())
+            self.otherMacs?.check()
         }
         ws.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -126,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         macmon.stop()
         history.flush(sync: true)
         processTracker?.stop()
+        otherMacs?.publishNow()
     }
 
     // MARK: - Quiet restart
@@ -221,7 +230,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                              settings: #selector(openSettings), quit: #selector(quit))
         d.onOpenWindow = { [weak self] in self?.openDashboardWindow() }
         // The window may already be scanning processes: show its latest list right away.
-        if processMonitor != nil { d.processes.snapshot = lastProcesses }
+        if processMonitor != nil { d.localProcesses = lastProcesses }
+        configureOtherMacs(d)
     }
 
     /// Applies the desired macmon interval after a delay; a newer call replaces an older one.
@@ -245,8 +255,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pm.onUpdate = { [weak self] snap in
                 guard let self else { return }
                 self.lastProcesses = snap
-                self.dashboard?.processes.snapshot = snap
-                self.dashboardWindow?.dashboard.processes.snapshot = snap
+                self.dashboard?.localProcesses = snap
+                self.dashboardWindow?.dashboard.localProcesses = snap
             }
             if let s = latest, s.diskRead.isFinite { pm.setTotalDisk(mbps: s.diskRead + s.diskWrite) }
             pm.start(useHelper: Settings.shared.useRootHelper && RootHelper.isInstalled)
@@ -263,6 +273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         menuOpen = true
         if MemoryProbe.enabled { MemoryProbe.report("menuWillOpen") }
+        updateOtherMacs() // iCloud Drive may have been turned on since
+        otherMacs?.check()
         updateProcessMonitor()
         applyInterval(after: 0.5)   // 1 s sampling once the menu stays open
     }
@@ -277,7 +289,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self, !self.menuOpen else { return }
             self.menu.removeAllItems()
             self.dashboard = nil
+            self.otherMacs?.keepHistories(Set([self.dashboardWindow?.dashboard.shownMac].compactMap { $0 }))
         }
+    }
+
+    // MARK: - Other Macs
+
+    /// Starts or stops sharing to match Settings (and iCloud Drive being on).
+    private func updateOtherMacs() {
+        let on = Settings.shared.shareWithOtherMacs
+        if on, otherMacs == nil, let folder = OtherMacs.folder {
+            let om = OtherMacs(folder: folder)
+            om.snapshot = { [weak self] quick, done in self?.shareSnapshot(quick: quick, done: done) }
+            om.onChange = { [weak self] in self?.otherMacsChanged() }
+            otherMacs = om
+            om.start()
+            log.notice("sharing with other Macs through iCloud Drive")
+        } else if !on, let om = otherMacs {
+            om.stop(removeMine: true)
+            otherMacs = nil
+            otherMacsChanged()
+            log.notice("stopped sharing with other Macs")
+        }
+    }
+
+    /// What OtherMacs publishes. The process list comes from a short scan of its own (the second
+    /// scan has CPU and disk rates), or from the menu's or window's while they scan anyway.
+    private func shareSnapshot(quick: Bool, done: @escaping (OtherMacs.Snapshot) -> Void) {
+        let finish = { [weak self] (procs: ProcSnapshot?) in
+            guard let self else { return }
+            done(OtherMacs.Snapshot(history: self.history.fileData(), latest: self.latest,
+                                    hasBattery: self.macmon.hasBattery, processes: procs))
+        }
+        if quick || processMonitor != nil {
+            finish(processMonitor != nil ? lastProcesses : nil)
+            return
+        }
+        let pm = ProcessMonitor()
+        let end = { [weak self, weak pm] (snap: ProcSnapshot?) in
+            guard let self, let pm, self.shareScan === pm else { return }
+            pm.stop()
+            self.shareScan = nil
+            finish(snap)
+        }
+        var scans = 0
+        pm.onUpdate = { snap in
+            scans += 1
+            if scans >= 2 { end(snap) }
+        }
+        if let s = latest, s.diskRead.isFinite { pm.setTotalDisk(mbps: s.diskRead + s.diskWrite) }
+        pm.start(useHelper: Settings.shared.useRootHelper && RootHelper.isInstalled)
+        shareScan = pm
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { end(nil) } // publish without, if the scans hang
+    }
+
+    private var otherMacList: [Dashboard.OtherMac] {
+        (otherMacs?.macs ?? []).map { Dashboard.OtherMac(id: $0.id, name: $0.info.name) }
+    }
+
+    private func configureOtherMacs(_ d: Dashboard) {
+        d.macStatus = { [weak self] id in self?.otherMacs?.status(id) ?? "" }
+        d.onSelectMac = { [weak self, weak d] id in
+            guard let self, let d, let id else { return }
+            self.otherMacs?.lookedAt(id)
+            self.showOtherMac(id, in: d)
+        }
+        d.otherMacs = otherMacList
+    }
+
+    /// Shows another Mac's newest copy in a dashboard (the menu's or the window's).
+    private func showOtherMac(_ id: String, in d: Dashboard) {
+        guard let om = otherMacs, om.macs.contains(where: { $0.id == id }) else { return }
+        let version = om.version(id)
+        om.history(id) { [weak self, weak d] h in
+            guard let d, let mac = self?.otherMacs?.macs.first(where: { $0.id == id }) else { return }
+            d.show(Self.remote(mac, history: h, version: version))
+        }
+    }
+
+    private static func remote(_ mac: OtherMacs.Mac, history: HistoryStore?, version: String) -> Dashboard.Remote {
+        let i = mac.info
+        var note = ""
+        if history == nil {
+            note = "Couldn't read this Mac's copy."
+        } else if i.processes == nil {
+            note = "No processes in this copy."
+        } else if let t = i.processesTime, i.published - t > OtherMacs.minGap {
+            let f = DateFormatter()
+            f.dateFormat = Calendar.current.isDateInToday(Date(timeIntervalSince1970: t)) ? "HH:mm" : "EEE d MMM HH:mm"
+            note = "Processes from \(f.string(from: Date(timeIntervalSince1970: t)))"
+        }
+        return Dashboard.Remote(id: mac.id, version: version, history: history, latest: Sample(values: i.latest, time: i.published),
+                                hasBattery: i.hasBattery, processes: i.processes, processNote: note)
+    }
+
+    private func otherMacsChanged() {
+        let list = otherMacList
+        for d in [dashboard, dashboardWindow?.dashboard].compactMap({ $0 }) {
+            d.otherMacs = list
+            // A newer copy of the Mac it shows.
+            if let id = d.shownMac, let om = otherMacs, om.version(id) != d.shownVersion { showOtherMac(id, in: d) }
+            d.updateMacStatus()
+        }
+        settingsWindow?.otherMacsChanged()
     }
 
     // MARK: - Terminal
@@ -395,6 +509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let wc = DashboardWindowController(history: history, latest: latest, hasBattery: macmon.hasBattery)
             wc.onVisibilityChange = { [weak self] visible in self?.dashboardVisibilityChanged(visible) }
             wc.onClose = { [weak self] in self?.dashboardWindowClosed() }
+            if processMonitor != nil { wc.dashboard.localProcesses = lastProcesses }
+            configureOtherMacs(wc.dashboard)
             dashboardWindow = wc
             UserDefaults.standard.set(true, forKey: Self.windowOpenKey)
             NSApp.setActivationPolicy(.regular)
@@ -425,6 +541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.dashboardWindow = nil
             self.updateProcessMonitor()
             self.applyInterval(after: 10)
+            self.otherMacs?.keepHistories(Set([self.dashboard?.shownMac].compactMap { $0 }))
         }
     }
 
@@ -486,6 +603,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 UsageAlerts.shared.onOpen = { [weak self] in self?.openProcessHistory() }
                 UsageAlerts.shared.listen()
             }
+            wc.otherMacs = { [weak self] in
+                guard let om = self?.otherMacs else { return [] }
+                return om.macs.map { (id: $0.id, name: $0.info.name, status: om.status($0.id)) }
+            }
+            wc.forgetMac = { [weak self] id in self?.otherMacs?.forget(id) }
+            wc.otherMacsChanged()
             wc.onClose = { [weak self] in self?.settingsWindow = nil }
             settingsWindow = wc
         }

@@ -115,7 +115,10 @@ final class ChartsView: NSView {
     var layout = ChartLayout() { didSet { contentChanged() } }
     var tier = 0 { didSet { contentChanged() } }
     var latest: Sample? { didSet { contentChanged() } }
-    var history: HistoryStore?
+    var history: HistoryStore? { didSet { contentChanged() } }
+    /// The time the charts end at: nil for now, or when another Mac's copy was made (OtherMacs.swift).
+    var asOf: TimeInterval? { didSet { contentChanged() } }
+    private var now: TimeInterval { asOf ?? Date().timeIntervalSince1970 }
     var onHover: ((TimeInterval?) -> Void)?
     /// Called after a click zooms in or out; the view's height needs updating then.
     var onZoom: (() -> Void)?
@@ -279,7 +282,7 @@ final class ChartsView: NSView {
         let t0 = MemoryProbe.enabled ? CACurrentMediaTime() : 0
         defer { if MemoryProbe.enabled { Self.drawStats.count += 1; Self.drawStats.seconds += CACurrentMediaTime() - t0 } }
         guard let ctx = NSGraphicsContext.current?.cgContext, let history else { return }
-        let now = Date().timeIntervalSince1970
+        let now = self.now
         let cap = HistoryStore.tiers[tier].capacity
         let thresholds = Settings.shared.thresholds
         fitScale = Settings.shared.zoomCharts
@@ -536,7 +539,7 @@ final class ChartsView: NSView {
     private func updateTimeLabels() {
         guard window != nil else { return }
         let cell = hoverChart.flatMap { id in cells().first { $0.row.id == id } }
-        let labels = cell.map { hoverTimeLabels($0, now: Date().timeIntervalSince1970) }
+        let labels = cell.map { hoverTimeLabels($0, now: now) }
         let axis = cell.flatMap { c in labels.map { (chart: c.chart, labels: $0.axis) } }
         if axis?.chart != shownTimeLabels?.chart || axis?.labels != shownTimeLabels?.labels {
             shownTimeLabels = axis
@@ -602,7 +605,7 @@ final class ChartsView: NSView {
     private func showHoverValues() {
         lastHoverValues = CACurrentMediaTime()
         updateOverlay()
-        let now = Date().timeIntervalSince1970
+        let now = self.now
         onHover?(hoverIndex.flatMap { history?.bucketStart(tier: tier, index: $0, now: now) })
     }
 
@@ -620,7 +623,7 @@ final class ChartsView: NSView {
         // Offscreen (snapshots) there are no layers to show; draw(_:) draws the values then.
         overlay.isHidden = window == nil
         guard window != nil else { return }
-        let cs = cells(), now = Date().timeIntervalSince1970, thresholds = Settings.shared.thresholds
+        let cs = cells(), now = self.now, thresholds = Settings.shared.thresholds
         overlay.prepare(count: cs.count)
         for (c, l) in zip(cs, overlay.cells) {
             if let h = hoverIndex { l.cursor.frame = cursorRect(c, h) }

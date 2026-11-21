@@ -39,6 +39,9 @@ enum SnapshotMode {
                 busy.ramUsedGB = busy.ramTotalGB * 0.95
                 renderDashboard(history: history, sample: busy, procs: procSnap, hasBattery: source.hasBattery,
                                 appearance: appearance, to: "\(outputDir)/dropdown-warning-\(name).png")
+                // Another Mac's copy (OtherMacs.swift), picked in the row of Macs.
+                renderOtherMac(history: history, sample: s, procs: procSnap,
+                               appearance: appearance, to: "\(outputDir)/dropdown-other-mac-\(name).png")
                 // The dashboard window, larger than the menu.
                 renderWindow(history: history, sample: s, procs: procSnap, hasBattery: source.hasBattery,
                              size: NSSize(width: 760, height: 900), appearance: appearance, to: "\(outputDir)/window-\(name).png")
@@ -148,6 +151,23 @@ enum SnapshotMode {
         d.processes.snapshot = procs
         d.onOpenWindow = {} // shows the button, as in the menu
         // Approximates the menu's glass background; the real menu blurs what is behind it.
+        let bg = appearance == .darkAqua ? NSColor(white: 0.2, alpha: 1) : NSColor(white: 0.96, alpha: 1)
+        write(d.snapshotView(), appearance: appearance, background: bg, padding: 0, to: path)
+    }
+
+    /// The menu showing a Mac mini's copy from 2 minutes ago (the demo history, as another Mac's).
+    private static func renderOtherMac(history: HistoryStore, sample: Sample, procs: ProcSnapshot?,
+                                       appearance: NSAppearance.Name, to path: String) {
+        let d = Dashboard(history: history, latest: sample, hasBattery: true)
+        d.update(sample: sample)
+        d.localProcesses = procs
+        d.onOpenWindow = {}
+        d.otherMacs = [.init(id: "mini", name: "Mac mini"), .init(id: "studio", name: "Mac Studio")]
+        d.macStatus = { _ in "2 min ago" }
+        var copy = sample
+        copy.time = sample.time - 120
+        d.show(.init(id: "mini", version: "", history: HistoryStore(copy: history.fileData()), latest: copy,
+                     hasBattery: false, processes: procs, processNote: ""))
         let bg = appearance == .darkAqua ? NSColor(white: 0.2, alpha: 1) : NSColor(white: 0.96, alpha: 1)
         write(d.snapshotView(), appearance: appearance, background: bg, padding: 0, to: path)
     }

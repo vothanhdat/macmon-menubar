@@ -45,6 +45,9 @@ _Screenshots use demo history and demo process names._
   See [Process history](#process-history).
 - **In a terminal, also over SSH**: `macmon-indicator` shows the same charts, top processes and
   process history in a terminal, from the app running on that Mac. See [In a terminal](#in-a-terminal-also-over-ssh).
+- **Your other Macs** (optional, through iCloud Drive): each Mac puts a copy of its charts and top
+  processes in iCloud Drive every hour, and the menu shows your other Macs above the charts. Not
+  live, but looking at one asks it for the latest. See [Other Macs](#other-macs-through-icloud-drive).
 - **Optional root mode** to see disk use of system processes (Spotlight, Time Machine, …).
 - Starts at login, no Dock icon (unless the dashboard window is open), stays out of the way.
 
@@ -161,6 +164,30 @@ terminal view is a small Rust program ([ratatui](https://ratatui.rs)) inside the
 `Contents/MacOS/macmon-indicator`; the Homebrew cask and `make install` put it on your PATH. With a
 downloaded copy, link it yourself:
 `ln -s "/Applications/MacMon Indicator.app/Contents/MacOS/macmon-indicator" /opt/homebrew/bin/`.
+
+## Other Macs (through iCloud Drive)
+
+Turn on **Settings → Other Macs → Share with my other Macs through iCloud Drive** on each of your
+Macs. A row of names then shows above the menu's charts, and in the window: **This Mac**, then the
+others. Click one to see its charts and top processes from its last copy. The range row says when
+that copy was made and how old it is (`10:15 · 40 min ago`), and hovering shows that Mac's times.
+
+- **Not live.** Each Mac publishes a copy every hour, before it sleeps and when the app quits. When
+  you look at a Mac whose copy is older than 5 minutes, your Mac asks it for the latest: the range
+  row says `updating…` until it arrives, usually within a minute or two, since the request and the
+  answer both go through iCloud. A Mac that's asleep, off or offline answers once it's back; after
+  5 minutes the row says `no reply`. Click its name again to ask again (at most every 5 minutes).
+- **What's shared**: the Mac's name, model and app version, its history (a copy of `history.bin`,
+  about 270 KB), its latest readings and its top 20 processes by each column. Process history stays
+  on each Mac. About 270 KB per copy, so roughly 7 MB a day for a Mac that's on all day.
+- **Where**: `iCloud Drive/MacMon Indicator/`, one folder per Mac. Each Mac writes only in its own
+  folder, so iCloud never has two versions of a file to choose between. A Mac's request for the
+  latest is a small file in its own folder that the other Mac watches for.
+- **Your settings apply**: which charts show, their order and the warning limits are this Mac's.
+- **Turning it off** removes this Mac's copy. To remove a Mac you no longer use, pick it next to
+  **Forget…** in Settings; a Mac that still shares shows again after its next copy.
+- iCloud Drive must be on (System Settings → your name → iCloud → iCloud Drive). Your live data,
+  history and settings stay where they are; only the copies go to iCloud Drive.
 
 ## Resource use
 
@@ -382,7 +409,8 @@ make app                                                          # build into b
 ./build/macmon-indicator-helper --stdout | head                   # helper output (your processes)
 ```
 
-The tests in `Tests/` cover the history file (buckets, gaps, restart, reading a file from an older
+The tests in `Tests/` cover sharing with other Macs (the shared folder, requests and their
+answers, reading a copy of another Mac's history), the history file (buckets, gaps, restart, reading a file from an older
 version), how process scans are added up and kept by hour and day, and the process history
 database. They use Swift Testing, which the Command Line Tools include, write only to temporary
 folders, and take their times as arguments, so days of scans run in a moment. GitHub Actions runs
@@ -402,6 +430,9 @@ the menu, because an open menu takes the keyboard and typing elsewhere closes it
 `MACMON_DEBUG_WINDOW=1` uses the dashboard window instead (it doesn't take focus): the same tests with
 clicks sent through the window, then three window sizes, then minimize and restore.
 `MACMON_INDICATOR_HISTORY_DIR=<dir>` keeps a test build away from your real history.
+`MACMON_INDICATOR_SHARE_DIR=<dir>` shares through that folder instead of iCloud Drive, and
+`MACMON_DEBUG_MAC_ID` and `MACMON_DEBUG_MAC_NAME` give a copy of the app another identity: two
+copies with their own history folders, IDs and the same share folder act as two Macs.
 `MACMON_DEBUG_RENDER=<dir>` also saves screen captures of the charts during the test.
 `--settings <dir>` renders the Settings window, light and dark.
 `--process-history <dir>` runs the process tracker on a throwaway file with 3 s scans (restarting it

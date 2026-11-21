@@ -31,6 +31,7 @@ final class Settings {
             "quietRestart": true,
             "trackProcesses": true,
             "notifyUnusual": false,
+            "shareWithOtherMacs": false,
         ])
         showNewCharts()
     }
@@ -153,6 +154,11 @@ final class Settings {
     var notifyUnusual: Bool {
         get { d.bool(forKey: "notifyUnusual") }
         set { d.set(newValue, forKey: "notifyUnusual"); notify() }
+    }
+    /// Share this Mac's charts with your other Macs through iCloud Drive, and show theirs (OtherMacs.swift).
+    var shareWithOtherMacs: Bool {
+        get { d.bool(forKey: "shareWithOtherMacs") }
+        set { d.set(newValue, forKey: "shareWithOtherMacs"); notify() }
     }
     var macmonPath: String? {
         get { d.string(forKey: "macmonPath") }

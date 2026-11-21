@@ -61,12 +61,66 @@ struct Sample {
     }
 }
 
+extension Sample {
+    /// The reading by name (each series' `csvName`, and a few more), leaving out what isn't
+    /// available. Shared with your other Macs (OtherMacs.swift).
+    var values: [String: Float] {
+        var v: [String: Float] = [:]
+        for s in Series.allCases where value(s).isFinite { v[s.csvName] = value(s) }
+        if ramTotalGB.isFinite { v["ram_total_gb"] = ramTotalGB }
+        if fanMax.isFinite { v["fan_max_rpm"] = fanMax }
+        v["mem_pressure"] = Float(memPressure)
+        v["fan_count"] = Float(fanCount)
+        v["on_ac"] = onAC ? 1 : 0
+        return v
+    }
+
+    init(values v: [String: Float], time: TimeInterval) {
+        self.init()
+        self.time = time
+        for s in Series.allCases { self[keyPath: s.keyPath] = v[s.csvName] ?? .nan }
+        ramTotalGB = v["ram_total_gb"] ?? .nan
+        fanMax = v["fan_max_rpm"] ?? .nan
+        memPressure = Int(v["mem_pressure"] ?? 0)
+        fanCount = Int(v["fan_count"] ?? 0)
+        onAC = (v["on_ac"] ?? 1) != 0
+    }
+}
+
 /// Series kept in history. Order is part of the history file format: append only.
 enum Series: Int, CaseIterable {
     case cpu, ecpu, pcpu, gpu, ram, swap, cpuPower, gpuPower, anePower, sysPower
     case batteryW, batteryPct, cpuTemp, gpuTemp, fan0, fan1, diskRead, diskWrite
     case diskReadOps, diskWriteOps
     case netIn, netOut
+
+    /// Where `Sample` keeps it; `Sample.value(_:)` reads the same field (a switch is quicker there).
+    var keyPath: WritableKeyPath<Sample, Float> {
+        switch self {
+        case .cpu: return \.cpu
+        case .ecpu: return \.ecpu
+        case .pcpu: return \.pcpu
+        case .gpu: return \.gpu
+        case .ram: return \.ramUsedGB
+        case .swap: return \.swapUsedGB
+        case .cpuPower: return \.cpuPower
+        case .gpuPower: return \.gpuPower
+        case .anePower: return \.anePower
+        case .sysPower: return \.sysPower
+        case .batteryW: return \.batteryW
+        case .batteryPct: return \.batteryPct
+        case .cpuTemp: return \.cpuTemp
+        case .gpuTemp: return \.gpuTemp
+        case .fan0: return \.fan0
+        case .fan1: return \.fan1
+        case .diskRead: return \.diskRead
+        case .diskWrite: return \.diskWrite
+        case .diskReadOps: return \.diskReadOps
+        case .diskWriteOps: return \.diskWriteOps
+        case .netIn: return \.netIn
+        case .netOut: return \.netOut
+        }
+    }
 
     var csvName: String {
         switch self {

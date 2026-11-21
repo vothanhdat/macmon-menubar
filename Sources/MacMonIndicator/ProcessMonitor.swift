@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-struct ProcRow {
+struct ProcRow: Codable {
     let pid: pid_t
     let name: String
     var cpu: Double?   // % of one core
@@ -12,7 +12,7 @@ struct ProcRow {
     var kernel: Double? = nil
 }
 
-struct ProcSnapshot {
+struct ProcSnapshot: Codable {
     var rows: [ProcRow] = []
     /// Disk throughput not attributed to any visible process (system processes in non-root mode).
     var hiddenDiskBps: Double?
