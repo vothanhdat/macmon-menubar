@@ -3,12 +3,30 @@ import AppKit
 /// Process history as a sortable table: one row per app (all its processes together) or per
 /// executable, over a chosen range. Under it a chart over time: the top programs stacked, or the
 /// selected row alone or against everything else (click it again, or Esc, for all programs again).
-/// Created when opened, released when closed.
+/// With your other Macs sharing (OtherMacs.swift), a menu at the left shows theirs instead, from
+/// their copies. Created when opened, released when closed.
 final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate,
     NSSearchFieldDelegate {
     var onClose: (() -> Void)?
 
-    private let tracker: ProcessTracker
+    // Your other Macs, set by the app (see OtherMacs): the ones that share, how old a Mac's copy
+    // is ("40 min ago", "updating…"), which copy is newest, asking for the latest, and reading one.
+    var otherMacs: () -> [(id: String, name: String)] = { [] }
+    var macStatus: (String) -> String = { _ in "" }
+    var macVersion: (String) -> String = { _ in "" }
+    var lookAt: (String) -> Void = { _ in }
+    var loadMac: (String, @escaping (ProcessTracker?) -> Void) -> Void = { $1(nil) }
+
+    /// This Mac's history.
+    private let local: ProcessTracker
+    /// The history shown: this Mac's or another Mac's copy, nil when that Mac has none.
+    private var tracker: ProcessTracker?
+    private let macPopup = NSPopUpButton()
+    private var macs: [(id: String, name: String)] = []
+    /// The other Mac shown (nil: this one), the copy shown, and the newest load asked for.
+    private var shownMac: String?
+    private var shownVersion = ""
+    private var macRequest = 0
     private let rangeControl = NSSegmentedControl(labels: ProcessTracker.Range.allCases.map(\.title), trackingMode: .selectOne,
                                                   target: nil, action: nil)
     private let groupControl = NSSegmentedControl(labels: ["Apps", "Executables"], trackingMode: .selectOne, target: nil, action: nil)
@@ -58,11 +76,13 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         var energy: Double { s.detail ? s.energy : -1 }
         var power: Double { s.detail && s.running > 0 ? s.energy / s.running : -1 }
         /// CPU energy used on battery, in full charges (0.12: 12% of one). Negative: not known.
-        var battery: Double { s.detail ? s.batteryEnergy / 3600 / (Battery.capacityWh ?? .infinity) : -1 }
+        var battery: Double { s.detail ? s.batteryEnergy / 3600 / (batteryWh ?? .infinity) : -1 }
         var ramAvg: Double { s.running > 0 ? s.ramTime / s.running : 0 }
         var diskRead: Double { s.detail ? s.diskRead : -1 }
         var diskWritten: Double { s.detail ? s.diskWritten : -1 }
         var childCpu: Double { s.detail ? s.childCpu : -1 }
+        /// A full charge of that Mac's battery (Summary.batteryWh).
+        var batteryWh: Double? = Battery.capacityWh
     }
 
     struct Column {
@@ -74,7 +94,8 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         let value: (Row) -> Double
     }
 
-    /// Battery only on a Mac that has one.
+    /// Battery only on a Mac that has one. The window has them all, and hides Battery for a Mac
+    /// without (this one or the one it shows).
     static let columns: [Column] = allColumns.filter { $0.id != "battery" || Battery.capacityWh != nil }
 
     static let allColumns: [Column] = [
@@ -124,6 +145,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     ]
 
     init(tracker: ProcessTracker) {
+        local = tracker
         self.tracker = tracker
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1370, height: 760),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -154,12 +176,16 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         search.placeholderString = "Filter"
         search.delegate = self
         search.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        macPopup.target = self
+        macPopup.action = #selector(macChanged)
+        macPopup.toolTip = "This Mac, or another of your Macs from its copy in iCloud Drive"
+        macPopup.isHidden = true
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let bar = NSStackView(views: [rangeControl, groupControl, spacer, search])
+        let bar = NSStackView(views: [macPopup, rangeControl, groupControl, spacer, search])
         bar.spacing = 12
 
-        for c in Self.columns {
+        for c in Self.allColumns {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(c.id))
             col.title = c.title
             col.width = c.width
@@ -167,6 +193,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             col.headerToolTip = c.tip
             col.sortDescriptorPrototype = NSSortDescriptor(key: c.id, ascending: c.id == "name")
             if c.id != "name" { col.headerCell.alignment = .right }
+            col.isHidden = c.id == "battery" && Battery.capacityWh == nil
             table.addTableColumn(col)
         }
         table.style = .fullWidth
@@ -241,16 +268,88 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     private var range: ProcessTracker.Range { ProcessTracker.Range(rawValue: rangeControl.selectedSegment) ?? .today }
     private var byExecutable: Bool { groupControl.selectedSegment == 1 }
 
-    /// Reads the range again (after a scan, or when the range changes).
+    /// Reads the range again (when it changes, or the history shown does).
     func reload() {
+        guard let tracker else {
+            summary = ProcessTracker.Summary(batteryWh: nil)
+            loaded = true
+            rebuildRows()
+            loadChart()
+            return
+        }
         tracker.summary(range) { [weak self] s in
-            guard let self else { return }
+            guard let self, self.tracker === tracker else { return }
             self.summary = s
             self.loaded = true
+            self.table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("battery"))?.isHidden = s.batteryWh == nil
             self.rebuildRows()
             self.loadChart()
         }
     }
+
+    /// After a scan of this Mac.
+    func scanned() {
+        if shownMac == nil { reload() }
+    }
+
+    // MARK: - Other Macs
+
+    /// The Macs that share changed, or what they shared did.
+    func otherMacsChanged() {
+        let list = otherMacs()
+        if !list.elementsEqual(macs, by: { $0 == $1 }) {
+            macs = list
+            let menu = NSMenu()
+            menu.addItem(withTitle: "This Mac", action: nil, keyEquivalent: "")
+            menu.addItem(.separator())
+            for m in list { menu.addItem(withTitle: m.name, action: nil, keyEquivalent: "") }
+            macPopup.menu = menu
+            macPopup.isHidden = list.isEmpty
+        }
+        guard let id = shownMac else { macPopup.selectItem(at: 0); return }
+        guard let i = macs.firstIndex(where: { $0.id == id }) else { show(nil); return } // forgotten, or sharing is off
+        macPopup.selectItem(at: i + 2)
+        if macVersion(id) != shownVersion { show(id) } else { updateFooter() } // a newer copy, or how old it is
+    }
+
+    @objc private func macChanged() {
+        let i = macPopup.indexOfSelectedItem - 2
+        let id = i >= 0 && i < macs.count ? macs[i].id : nil
+        if let id { lookAt(id) } // asks for the latest if its copy is old (choosing it again: once more)
+        if id != shownMac { show(id) } else { updateFooter() }
+    }
+
+    /// Shows this Mac (nil) or another Mac's newest copy.
+    private func show(_ id: String?) {
+        let changed = id != shownMac
+        shownMac = id
+        macRequest += 1
+        let request = macRequest
+        window?.title = macName.map { "Process History — \($0)" } ?? "Process History"
+        guard let id else {
+            macPopup.selectItem(at: 0)
+            shownVersion = ""
+            tracker = local
+            reload()
+            return
+        }
+        shownVersion = macVersion(id)
+        if changed {
+            // Until the copy is read: nothing of this Mac's next to the other Mac's name.
+            tracker = nil
+            loaded = false
+            summary = ProcessTracker.Summary(batteryWh: nil)
+            rebuildRows()
+            loadChart()
+        }
+        loadMac(id) { [weak self] t in
+            guard let self, self.macRequest == request else { return }
+            self.tracker = t
+            self.reload()
+        }
+    }
+
+    private var macName: String? { shownMac.flatMap { id in macs.first { $0.id == id }?.name } }
 
     private var withRest: Bool { restControl.selectedSegment == 1 }
     private var metric: Metric { Metric(rawValue: metricControl.selectedSegment) ?? .cpu }
@@ -261,6 +360,12 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         chartRequest += 1
         let request = chartRequest
         restControl.isHidden = selectedPath == nil
+        guard let tracker else {
+            series = nil
+            overview = nil
+            showChart()
+            return
+        }
         if let path = selectedPath, !withRest {
             tracker.series(path, range) { [weak self] s in
                 guard let self, self.chartRequest == request else { return }
@@ -301,6 +406,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             }
         } else {
             chartTitle.stringValue = ""
+            chart.message = ""
             chart.model = nil
         }
         if marks != swatches {
@@ -464,13 +570,13 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
             guard show else { return nil }
             let name = ProcKey.name(p.path)
             guard filter.isEmpty || name.localizedCaseInsensitiveContains(filter) || p.path.localizedCaseInsensitiveContains(filter) else { return nil }
-            return Row(name: name, path: p.path, s: p.stats)
+            return Row(name: name, path: p.path, s: p.stats, batteryWh: summary.batteryWh)
         }
     }
 
     /// Sorts by a column id; ties (often zeros) fall back to CPU time, then name.
     static func sort(_ rows: inout [Row], by key: String, ascending: Bool) {
-        guard let col = columns.first(where: { $0.id == key }) else { return }
+        guard let col = allColumns.first(where: { $0.id == key }) else { return }
         if key == "name" {
             rows.sort { ascending ? $0.name.localizedStandardCompare($1.name) == .orderedAscending
                                   : $0.name.localizedStandardCompare($1.name) == .orderedDescending }
@@ -485,8 +591,26 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func updateFooter() {
-        footer.stringValue = Self.footer(summary, range: range, empty: rows.isEmpty && summary.programs.isEmpty && loaded)
-            .joined(separator: "\n")
+        var lines = Self.footer(summary, range: range, empty: rows.isEmpty && summary.programs.isEmpty && loaded && shownMac == nil)
+        if let id = shownMac, let name = macName {
+            lines.insert(Self.copyLine(name: name, made: tracker?.copy?.made, status: macStatus(id), loaded: loaded,
+                                       now: Date().timeIntervalSince1970), at: 0)
+        }
+        footer.stringValue = lines.joined(separator: "\n")
+    }
+
+    /// The first line under another Mac's table: when its copy was made and how old it is, or
+    /// that the latest is on its way, or why there is none. `status` is OtherMacs.status.
+    static func copyLine(name: String, made: Double?, status: String, loaded: Bool, now: Double) -> String {
+        guard let made else {
+            if !loaded || status == "updating…" { return "Getting \(name)’s process history…" }
+            return "\(name) has no process history in iCloud Drive yet. It needs process history on, and this version of MacMon Indicator."
+        }
+        let f = DateFormatter()
+        f.dateFormat = Calendar.current.isDate(Date(timeIntervalSince1970: made), inSameDayAs: Date(timeIntervalSince1970: now))
+            ? "HH:mm" : "EEE d MMM HH:mm"
+        let age = status.isEmpty ? ShareFolder.ago(now - made) : status
+        return "\(name)’s copy from \(f.string(from: Date(timeIntervalSince1970: made))) · \(age)" + (age.hasSuffix("…") ? "" : ".")
     }
 
     /// Lines under the table: when the last scan ran, what the numbers can't include. `empty`:
@@ -568,13 +692,15 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
         if selectedPath != nil { table.deselectAll(nil) }
     }
 
-    /// For previews: the given range and measure, with the first row selected or none.
-    func preview(range: ProcessTracker.Range, metric: Metric, select: Bool, withRest: Bool) {
+    /// For previews: the given range and measure, with the first row selected or none, of this
+    /// Mac or another (`mac`, one of `otherMacs`).
+    func preview(range: ProcessTracker.Range, metric: Metric, select: Bool, withRest: Bool, mac: String? = nil) {
         rangeControl.selectedSegment = range.rawValue
         metricControl.selectedSegment = metric.rawValue
         restControl.selectedSegment = withRest ? 1 : 0
         selectedPath = select ? rows.first?.path : nil
-        reload()
+        if let i = macs.firstIndex(where: { $0.id == mac }) { macPopup.selectItem(at: i + 2) }
+        if mac != nil { show(mac) } else { reload() }
     }
 
     @objc private func groupChanged() {
@@ -625,7 +751,7 @@ final class ProcessHistoryWindowController: NSWindowController, NSWindowDelegate
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let id = tableColumn?.identifier, let col = Self.columns.first(where: { $0.id == id.rawValue }) else { return nil }
+        guard let id = tableColumn?.identifier, let col = Self.allColumns.first(where: { $0.id == id.rawValue }) else { return nil }
         let cell: NSTableCellView
         if let reused = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView {
             cell = reused

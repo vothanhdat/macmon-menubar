@@ -140,6 +140,74 @@ import Testing
         #expect(book.scan(known: [:])["mini"] == nil)
     }
 
+    /// Process history goes along when a publish has it, stays with one that doesn't, and goes
+    /// away when the Mac turns it off.
+    @Test func processHistoryGoesAlongAndCanBeRemoved() throws {
+        let tracker = ProcessTracker(directory: local.url.appendingPathComponent(UUID().uuidString))
+        func scan(_ wall: Double, cpu: Double) {
+            let p = ProcessTracker.Seen(start: 1_000_000, path: "/usr/bin/a", cpu: cpu, mem: 100, maxMem: 100, detail: true)
+            tracker.queue.sync { tracker.record([7: p], nowWall: wall, nowUp: UInt64(wall * 1e9), ticks: [1000, 0, 0]) }
+        }
+        scan(t0, cpu: 100)
+        scan(t0 + 300, cpu: 130)
+        let packed = try #require(tracker.queue.sync { tracker.makeCopy(now: t0 + 310) })
+        var i = info("mini", published: t0 + 310)
+        i.processHistory = t0 + 310
+        try mini.publish(i, history: history().fileData(), processHistory: .write(packed))
+
+        let e = try #require(book.scan(known: [:])["mini"])
+        #expect(e.info?.processHistory == t0 + 310)
+        #expect(e.processDate != nil)
+        let copy = try #require(book.loadProcessHistory("mini"))
+        #expect(copy.copy?.lastScan == t0 + 300)
+        let a = copy.queue.sync { copy.summarize(.last24h, now: t0 + 300) }.programs.first { $0.path == "/usr/bin/a" }
+        #expect(a?.stats.cpu == 30)
+
+        // An hourly publish without it leaves it there.
+        var hourly = info("mini", published: t0 + 3600)
+        hourly.processHistory = t0 + 310
+        try mini.publish(hourly, history: history().fileData())
+        #expect(book.loadProcessHistory("mini") != nil)
+
+        // Process history turned off on the Mac mini.
+        try mini.publish(info("mini", published: t0 + 7200), history: history().fileData(), processHistory: .remove)
+        let off = try #require(book.scan(known: [:])["mini"])
+        #expect(off.processDate == nil && off.info?.processHistory == nil)
+        #expect(book.loadProcessHistory("mini") == nil)
+        #expect(book.loadHistory("mini") != nil)
+    }
+
+    @Test func processHistoryIsAskedForByItsOwnAge() throws {
+        var i = info("mini", published: t0 + 3000)
+        i.processHistory = t0
+        #expect(!ShareFolder.shouldAsk(info: i, asked: nil, now: t0 + 3100))                    // charts are recent
+        #expect(ShareFolder.shouldAsk(info: i, asked: nil, now: t0 + 3100, processHistory: true)) // process history isn't
+        #expect(!ShareFolder.shouldAsk(info: i, asked: ShareFolder.Request(token: "t", time: t0 + 3050), now: t0 + 3100,
+                                       processHistory: true)) // asked already
+        // None there (off, or an app from before): asking may bring it.
+        #expect(ShareFolder.shouldAsk(info: info("mini", published: t0 + 3000), asked: nil, now: t0 + 3100, processHistory: true))
+        // An info.json from before has no process history; one with it reads back.
+        let old = try ShareFolder.decoder.decode(ShareFolder.Info.self, from: ShareFolder.encoder.encode(info("mini", published: t0)))
+        #expect(old.processHistory == nil)
+        #expect(try ShareFolder.decoder.decode(ShareFolder.Info.self, from: ShareFolder.encoder.encode(i)).processHistory == t0)
+    }
+
+    @Test func processHistoryCopyLine() {
+        let made = t0, now = t0 + 40 * 60 + 5
+        let line = ProcessHistoryWindowController.copyLine(name: "Mac mini", made: made, status: "40 min ago", loaded: true, now: now)
+        #expect(line.hasPrefix("Mac mini’s copy from ") && line.hasSuffix(" · 40 min ago."))
+        #expect(ProcessHistoryWindowController.copyLine(name: "Mac mini", made: made, status: "", loaded: true, now: now)
+            .hasSuffix(" · 40 min ago."))
+        #expect(ProcessHistoryWindowController.copyLine(name: "Mac mini", made: made, status: "updating…", loaded: true, now: now)
+            .hasSuffix(" · updating…"))
+        #expect(ProcessHistoryWindowController.copyLine(name: "Mac mini", made: nil, status: "", loaded: false, now: now)
+            == "Getting Mac mini’s process history…")
+        #expect(ProcessHistoryWindowController.copyLine(name: "Mac mini", made: nil, status: "updating…", loaded: true, now: now)
+            == "Getting Mac mini’s process history…")
+        #expect(ProcessHistoryWindowController.copyLine(name: "Mac mini", made: nil, status: "", loaded: true, now: now)
+            .hasPrefix("Mac mini has no process history"))
+    }
+
     @Test func trimKeepsTheTopOfEachColumn() {
         var snap = ProcSnapshot()
         for i in 0..<200 {

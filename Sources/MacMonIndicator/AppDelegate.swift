@@ -300,7 +300,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let on = Settings.shared.shareWithOtherMacs
         if on, otherMacs == nil, let folder = OtherMacs.folder {
             let om = OtherMacs(folder: folder)
-            om.snapshot = { [weak self] quick, done in self?.shareSnapshot(quick: quick, done: done) }
+            om.snapshot = { [weak self] quick, processHistory, done in
+                self?.shareSnapshot(quick: quick, processHistory: processHistory, done: done)
+            }
             om.onChange = { [weak self] in self?.otherMacsChanged() }
             otherMacs = om
             om.start()
@@ -315,11 +317,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// What OtherMacs publishes. The process list comes from a short scan of its own (the second
     /// scan has CPU and disk rates), or from the menu's or window's while they scan anyway.
-    private func shareSnapshot(quick: Bool, done: @escaping (OtherMacs.Snapshot) -> Void) {
+    private func shareSnapshot(quick: Bool, processHistory: Bool, done: @escaping (OtherMacs.Snapshot) -> Void) {
+        processHistoryCopy(processHistory, quick: quick) { [weak self] copy in
+            self?.shareSnapshot(quick: quick, processHistory: copy, done: done)
+        }
+    }
+
+    /// A copy of process history for OtherMacs to publish, if it asks: none while process history is off.
+    private func processHistoryCopy(_ wanted: Bool, quick: Bool, _ done: @escaping (ShareFolder.ProcessCopy) -> Void) {
+        guard wanted else { done(.keep); return }
+        guard let t = processTracker else { done(.remove); return }
+        if quick {
+            done(t.shareCopyNow().map { .write($0) } ?? .keep)
+        } else {
+            t.shareCopy { done($0.map { .write($0) } ?? .keep) }
+        }
+    }
+
+    private func shareSnapshot(quick: Bool, processHistory: ShareFolder.ProcessCopy, done: @escaping (OtherMacs.Snapshot) -> Void) {
         let finish = { [weak self] (procs: ProcSnapshot?) in
             guard let self else { return }
             done(OtherMacs.Snapshot(history: self.history.fileData(), latest: self.latest,
-                                    hasBattery: self.macmon.hasBattery, processes: procs))
+                                    hasBattery: self.macmon.hasBattery, processes: procs, processHistory: processHistory))
         }
         if quick || processMonitor != nil {
             finish(processMonitor != nil ? lastProcesses : nil)
@@ -391,6 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let id = d.shownMac, let om = otherMacs, om.version(id) != d.shownVersion { showOtherMac(id, in: d) }
             d.updateMacStatus()
         }
+        processHistoryWindow?.otherMacsChanged()
         settingsWindow?.otherMacsChanged()
     }
 
@@ -459,7 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard processTracker == nil else { return }
             let t = ProcessTracker(directory: historyDir)
             t.onScan = { [weak self] unusual in
-                self?.processHistoryWindow?.reload()
+                self?.processHistoryWindow?.scanned()
                 if Settings.shared.notifyUnusual { UsageAlerts.shared.post(unusual) }
             }
             t.start()
@@ -480,11 +500,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 wc.onClose = { [weak self] in
                     DispatchQueue.main.async { self?.processHistoryWindow = nil } // after it has finished closing
                 }
+                self.configureOtherMacs(wc)
                 self.processHistoryWindow = wc
             }
             self.processHistoryWindow?.showWindow(nil)
             self.bringToFront(self.processHistoryWindow?.window)
         }
+    }
+
+    /// Your other Macs' process history in the window, from their copies in iCloud Drive.
+    private func configureOtherMacs(_ wc: ProcessHistoryWindowController) {
+        wc.otherMacs = { [weak self] in (self?.otherMacs?.macs ?? []).map { ($0.id, $0.info.name) } }
+        wc.macStatus = { [weak self] id in self?.otherMacs?.status(id, processHistory: true) ?? "" }
+        wc.macVersion = { [weak self] id in self?.otherMacs?.processVersion(id) ?? "" }
+        wc.lookAt = { [weak self] id in self?.otherMacs?.lookedAt(id, processHistory: true) }
+        wc.loadMac = { [weak self] id, done in
+            guard let om = self?.otherMacs else { done(nil); return }
+            om.processHistory(id, done)
+        }
+        wc.otherMacsChanged()
     }
 
     /// Deletes all process history (from Settings).

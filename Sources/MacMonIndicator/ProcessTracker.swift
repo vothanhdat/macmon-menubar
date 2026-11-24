@@ -21,7 +21,7 @@ import Darwin
 /// Writes to disk once an hour (the hour that ended), and when the Mac sleeps or the app quits.
 final class ProcessTracker {
     /// `old`: an installed helper from before this version, used without the columns added since.
-    enum HelperState { case notUsed, ok, old, outdated, unreachable }
+    enum HelperState: Int { case notUsed, ok, old, outdated, unreachable }
 
     enum Range: Int, CaseIterable {
         case today, last24h, week, month, quarter
@@ -38,6 +38,8 @@ final class ProcessTracker {
         var since: Date?
         /// Programs using far more CPU today than they usually do, as of the last scan.
         var unusual: [Unusual] = []
+        /// A full charge of the Mac's battery, for the Battery column; nil on a Mac without one.
+        var batteryWh: Double? = Battery.capacityWh
     }
 
     /// A program that used far more CPU time today than on the days before.
@@ -112,11 +114,44 @@ final class ProcessTracker {
 
     init(directory: URL) {
         store = ProcessHistoryStore(url: directory.appendingPathComponent("process-history.sqlite"))
+        copy = nil
         queue.async { self.load() }
     }
 
+    /// What a copy from another Mac says about that Mac (see `shareCopy`).
+    struct Copy {
+        /// When the copy was made, and when that Mac last scanned (nil: not since it started).
+        var made: Double
+        var lastScan: Double?
+        var helper: HelperState
+        var batteryWh: Double?
+        /// What its ranges end at: its last scan, or when the copy was made.
+        var asOf: Double { lastScan ?? made }
+    }
+
+    /// Set for another Mac's process history (`init(copy:)`).
+    let copy: Copy?
+
+    /// Another Mac's process history, from its copy (OtherMacs.swift). It never scans, and its
+    /// ranges end at that Mac's last scan, as its charts end at its copy's time.
+    init(copy store: ProcessHistoryStore) {
+        self.store = store
+        let ms = { (k: String) in store.meta(k).map { Double($0) / 1000 } }
+        let c = Copy(made: ms(Self.madeKey) ?? 0, lastScan: ms(Self.lastScanKey),
+                     helper: store.meta(Self.helperKey).flatMap { HelperState(rawValue: Int($0)) } ?? .notUsed,
+                     batteryWh: store.meta(Self.batteryKey).flatMap { $0 > 0 ? Double($0) / 1000 : nil })
+        copy = c
+        queue.async {
+            self.load()
+            self.unusual = self.unusualToday(now: c.asOf)
+        }
+    }
+
+    /// The time ranges end at: now, or for a copy, its time.
+    private var clock: Double { copy?.asOf ?? Date().timeIntervalSince1970 }
+
     func start() {
-        guard timer == nil else { return }
+        guard timer == nil, copy == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: queue)
         // The first scan waits a little, so it doesn't add to the app's start.
         t.schedule(deadline: .now() + min(20, Self.interval), repeating: Self.interval, leeway: .seconds(max(1, Int(Self.interval / 10))))
@@ -156,6 +191,38 @@ final class ProcessTracker {
             self.unusual = []
             DispatchQueue.main.async(execute: done)
         }
+    }
+
+    // MARK: - Copies for other Macs
+
+    private static let madeKey = "copy_made_ms", lastScanKey = "copy_last_scan_ms", helperKey = "copy_helper",
+                       batteryKey = "copy_battery_mwh"
+
+    /// The history as a compressed copy for your other Macs (OtherMacs.swift), with the current
+    /// hour, on the main queue. Nil when it can't be made.
+    func shareCopy(_ done: @escaping (Data?) -> Void) {
+        queue.async {
+            let data = self.makeCopy(now: Date().timeIntervalSince1970)
+            DispatchQueue.main.async { done(data) }
+        }
+    }
+
+    /// The same, right away (before sleep or quit).
+    func shareCopyNow() -> Data? {
+        queue.sync { makeCopy(now: Date().timeIntervalSince1970) }
+    }
+
+    /// What `init(copy:)` reads: the hourly rows that Today and 24 Hours need (and of days not
+    /// added up yet), the daily rows, and what the Mac's footer says. Queue only.
+    func makeCopy(now: Double) -> Data? {
+        guard let store, copy == nil else { return nil }
+        let asOf = lastUp > 0 ? lastWall : now
+        let hoursFrom = rolledUpTo == 0 ? 0 : min(rolledUpTo, Self.dayStart(asOf), Self.hourStart(asOf) - 23 * 3600)
+        var meta: [String: Int64] = ["hour": hour, "rolled_up_to": rolledUpTo, "live_valid": 0, Self.madeKey: Int64(now * 1000),
+                                     Self.helperKey: Int64(helper.rawValue),
+                                     Self.batteryKey: Int64(((Battery.capacityWh ?? 0) * 1000).rounded())]
+        if lastUp > 0 { meta[Self.lastScanKey] = Int64(lastWall * 1000) }
+        return store.shareCopy(hour: hour, current: current, hoursFrom: hoursFrom, meta: meta)
     }
 
     // MARK: - State on disk
@@ -527,7 +594,7 @@ final class ProcessTracker {
     /// Each program's totals over `range`, on the main queue.
     func summary(_ range: Range, _ done: @escaping (Summary) -> Void) {
         queue.async {
-            let result = self.summarize(range, now: Date().timeIntervalSince1970)
+            let result = self.summarize(range, now: self.clock)
             DispatchQueue.main.async { done(result) }
         }
     }
@@ -535,6 +602,11 @@ final class ProcessTracker {
     /// Each program's totals over `range` ending at `now` (seconds since 1970). Queue only.
     func summarize(_ range: Range, now: Double) -> Summary {
         var result = Summary(lastScan: self.lastUp > 0 ? Date(timeIntervalSince1970: self.lastWall) : nil, helper: self.helper)
+        if let copy {
+            result.lastScan = copy.lastScan.map { Date(timeIntervalSince1970: $0) }
+            result.helper = copy.helper
+            result.batteryWh = copy.batteryWh
+        }
         result.unusual = self.unusual
         guard let store = self.store else { return result }
         let today = Self.dayStart(now)
@@ -557,7 +629,7 @@ final class ProcessTracker {
     /// One program (a key's path) over `range`, on the main queue.
     func series(_ path: String, _ range: Range, _ done: @escaping (Series) -> Void) {
         queue.async {
-            let result = self.points(path, range, now: Date().timeIntervalSince1970)
+            let result = self.points(path, range, now: self.clock)
             DispatchQueue.main.async { done(result) }
         }
     }
@@ -598,7 +670,7 @@ final class ProcessTracker {
     /// Every program's row in each hour or day of `range`, on the main queue.
     func export(_ range: Range, _ done: @escaping (Export) -> Void) {
         queue.async {
-            let result = self.rows(range, now: Date().timeIntervalSince1970)
+            let result = self.rows(range, now: self.clock)
             DispatchQueue.main.async { done(result) }
         }
     }
@@ -630,7 +702,7 @@ final class ProcessTracker {
     /// The programs at `paths` and all programs together over `range`, on the main queue.
     func overview(_ paths: [String], _ range: Range, byExecutable: Bool, _ done: @escaping (Overview) -> Void) {
         queue.async {
-            let result = self.stack(paths, range, byExecutable: byExecutable, now: Date().timeIntervalSince1970)
+            let result = self.stack(paths, range, byExecutable: byExecutable, now: self.clock)
             DispatchQueue.main.async { done(result) }
         }
     }

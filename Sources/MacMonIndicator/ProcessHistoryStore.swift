@@ -108,7 +108,39 @@ final class ProcessHistoryStore {
             sqlite3_close(db)
             return nil
         }
-        let ok = run("pragma journal_mode = wal") && run("pragma synchronous = normal") && run("""
+        guard run("pragma journal_mode = wal") && run("pragma synchronous = normal") && prepare() else { sqlite3_close(db); return nil }
+    }
+
+    /// A copy of a process history file in memory, e.g. another Mac's (see OtherMacs.swift), never
+    /// written back. A file from an older version gets the columns added since, as on an update.
+    /// Nil when the data isn't a whole process history file.
+    init?(copy data: Data) {
+        guard data.count >= 100, data.starts(with: Data("SQLite format 3\0".utf8)),
+              sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
+              let buf = sqlite3_malloc64(UInt64(data.count))?.assumingMemoryBound(to: UInt8.self) else {
+            sqlite3_close(db)
+            return nil
+        }
+        data.copyBytes(to: buf, count: data.count)
+        // Bytes 18 and 19 of the header say whether the file uses a WAL, which a copy in memory can't.
+        buf[18] = 1
+        buf[19] = 1
+        // SQLite frees the buffer, also when this fails.
+        guard sqlite3_deserialize(db, "main", buf, Int64(data.count), Int64(data.count),
+                                  UInt32(SQLITE_DESERIALIZE_FREEONCLOSE | SQLITE_DESERIALIZE_RESIZEABLE)) == SQLITE_OK else {
+            sqlite3_close(db)
+            return nil
+        }
+        var ok = false
+        run("pragma quick_check", []) { ok = String(cString: sqlite3_column_text($0, 0)) == "ok" } // e.g. cut short
+        var hasStats = false
+        run("select 1 from sqlite_master where type = 'table' and name = 'stats'", []) { _ in hasStats = true }
+        guard ok, hasStats, prepare() else { sqlite3_close(db); return nil }
+    }
+
+    /// Creates the tables, and adds the columns that came later to a file from before them.
+    private func prepare() -> Bool {
+        guard run("""
             create table if not exists meta (k text primary key, v integer) without rowid;
             create table if not exists keys (id integer primary key, path text not null unique);
             create table if not exists stats (span integer not null, bucket integer not null, key integer not null,
@@ -117,14 +149,14 @@ final class ProcessHistoryStore {
                 disk_read real, disk_written real, detail integer, primary key (span, bucket, key)) without rowid;
             create table if not exists live (pid integer primary key, start real, exe integer, app integer, cpu real,
                 pcore real, energy real, disk_read real, disk_written real, detail integer);
-            """)
-        guard ok else { sqlite3_close(db); return nil }
+            """) else { return false }
         // Added later (files from before have no value there: 0 in `stats`, not known in `live`).
         for table in ["stats", "live"] where !hasColumn(table, "child_cpu") {
             run("alter table \(table) add column child_cpu real")
         }
         if !hasColumn("stats", "battery_energy") { run("alter table stats add column battery_energy real") }
         for column in ["net_in", "net_out"] where !hasColumn("stats", column) { run("alter table stats add column \(column) real") }
+        return true
     }
 
     private func hasColumn(_ table: String, _ column: String) -> Bool {
@@ -342,6 +374,37 @@ final class ProcessHistoryStore {
         runMany("insert into live (pid, start, exe, app, cpu, pcore, energy, disk_read, disk_written, detail, child_cpu) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 procs.map { [Int64($0.key), $0.value.start, $0.value.exe, $0.value.app, $0.value.cpu, $0.value.pcore,
                              $0.value.energy, $0.value.diskRead, $0.value.diskWritten, $0.value.detail, $0.value.childCpu] })
+    }
+
+    // MARK: - Copies
+
+    /// A copy of the file to share with your other Macs (see OtherMacs.swift), compressed (LZFSE):
+    /// with the rows of the hour `hour` from `current` (not on disk yet), the `meta` values set,
+    /// the hourly rows before `hoursFrom` left out (those days have daily rows), and without the
+    /// running processes. The file itself is only read.
+    func shareCopy(hour: Int64, current: [Int64: ProcStats], hoursFrom: Int64, meta: [String: Int64]) -> Data? {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("macmon-indicator-share-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        // A consistent copy, with what is still in the WAL.
+        guard run("vacuum into ?", [tmp.path]), let data = try? Data(contentsOf: tmp), let copy = ProcessHistoryStore(copy: data) else {
+            return nil
+        }
+        copy.transaction {
+            if hour != 0 { copy.write(span: 0, bucket: hour, current) }
+            copy.run("delete from stats where span = 0 and bucket < ?", [hoursFrom])
+            copy.run("delete from live")
+            for (k, v) in meta { copy.setMeta(k, v) }
+        }
+        copy.run("vacuum")
+        return copy.serialized().flatMap { try? ($0 as NSData).compressed(using: .lzfse) as Data }
+    }
+
+    /// A copy in memory as the bytes of a file.
+    private func serialized() -> Data? {
+        var size: sqlite3_int64 = 0
+        guard let p = sqlite3_serialize(db, "main", &size, 0) else { return nil }
+        defer { sqlite3_free(p) }
+        return Data(bytes: p, count: Int(size))
     }
 
     /// Deletes all process history.

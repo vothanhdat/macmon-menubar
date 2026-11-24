@@ -331,7 +331,22 @@ enum SnapshotMode {
                 let range = env["MACMON_DEBUG_PROCESS_RANGE"].flatMap(Int.init).flatMap(ProcessTracker.Range.init) ?? .today
                 let metric = env["MACMON_DEBUG_PROCESS_METRIC"].flatMap(Int.init).flatMap(ProcessHistoryWindowController.Metric.init) ?? .cpu
                 let select = env["MACMON_DEBUG_PROCESS_SELECT"].flatMap(Int.init) ?? 0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { wc.preview(range: range, metric: metric, select: select > 0, withRest: select == 2) }
+                // MACMON_DEBUG_PROCESS_OTHER_MAC: shows this history as another Mac's copy, by that name.
+                var mac: String?
+                if let name = env["MACMON_DEBUG_PROCESS_OTHER_MAC"], !name.isEmpty {
+                    let copy = tracker.shareCopyNow().flatMap { try? ($0 as NSData).decompressed(using: .lzfse) as Data }
+                        .flatMap(ProcessHistoryStore.init(copy:)).map(ProcessTracker.init(copy:))
+                    print(copy == nil ? "couldn't make a copy" : "showing it as \(name)'s copy")
+                    wc.otherMacs = { [("other", name)] }
+                    wc.macStatus = { _ in "just now" }
+                    wc.macVersion = { _ in "1" }
+                    wc.loadMac = { _, done in done(copy) }
+                    wc.otherMacsChanged()
+                    mac = "other"
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    wc.preview(range: range, metric: metric, select: select > 0, withRest: select == 2, mac: mac)
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                     guard let view = wc.window?.contentView else { exit(1) }
                     wc.window?.contentView = NSView()

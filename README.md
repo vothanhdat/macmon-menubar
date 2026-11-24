@@ -45,9 +45,10 @@ _Screenshots use demo history and demo process names._
   See [Process history](#process-history).
 - **In a terminal, also over SSH**: `macmon-indicator` shows the same charts, top processes and
   process history in a terminal, from the app running on that Mac. See [In a terminal](#in-a-terminal-also-over-ssh).
-- **Your other Macs** (optional, through iCloud Drive): each Mac puts a copy of its charts and top
-  processes in iCloud Drive every hour, and the menu shows your other Macs above the charts. Not
-  live, but looking at one asks it for the latest. See [Other Macs](#other-macs-through-icloud-drive).
+- **Your other Macs** (optional, through iCloud Drive): each Mac puts a copy of its charts, top
+  processes and process history in iCloud Drive, and the menu shows your other Macs above the
+  charts, Process History in a menu next to its ranges. Not live, but looking at one asks it for
+  the latest. See [Other Macs](#other-macs-through-icloud-drive).
 - **Optional root mode** to see disk use of system processes (Spotlight, Time Machine, …).
 - Starts at login, no Dock icon (unless the dashboard window is open), stays out of the way.
 
@@ -171,6 +172,8 @@ Turn on **Settings → Other Macs → Share with my other Macs through iCloud Dr
 Macs. A row of names then shows above the menu's charts, and in the window: **This Mac**, then the
 others. Click one to see its charts and top processes from its last copy. The range row says when
 that copy was made and how old it is (`10:15 · 40 min ago`), and hovering shows that Mac's times.
+**Process History** has the same Macs in a menu left of its ranges: pick one for its process
+history, from its last copy; the line under the table says when that copy was made.
 
 - **Not live.** Each Mac publishes a copy every hour, before it sleeps and when the app quits. When
   you look at a Mac whose copy is older than 5 minutes, your Mac asks it for the latest: the range
@@ -178,9 +181,17 @@ that copy was made and how old it is (`10:15 · 40 min ago`), and hovering shows
   answer both go through iCloud. A Mac that's asleep, off or offline answers once it's back; after
   5 minutes the row says `no reply`. Click its name again to ask again (at most every 5 minutes).
 - **What's shared**: the Mac's name, model and app version, its history (a copy of `history.bin`,
-  about 270 KB), its latest readings and its top 20 processes by each column. Process history stays
-  on each Mac. About 270 KB per copy, so roughly 7 MB a day for a Mac that's on all day.
-- **Where**: `iCloud Drive/MacMon Indicator/`, one folder per Mac. Each Mac writes only in its own
+  about 270 KB), its latest readings and its top 20 processes by each column. About 270 KB per
+  copy, so roughly 7 MB a day for a Mac that's on all day.
+- **Process history** (on Macs that keep it) goes along as a compressed copy of
+  `process-history.sqlite`: the last 24 hours by hour and up to 90 days by day, about 1 MB after
+  two weeks and a few MB once it holds 90 days. Being bigger, it isn't in every hourly copy: it goes
+  every 6 hours, before the Mac sleeps, when the app quits and whenever another Mac asks for the
+  latest. Picking a Mac in Process History asks when its copy is older than 5 minutes. A Mac's
+  ranges end at its last scan, so **Today** is that Mac's last day with data. Turning process
+  history off on a Mac removes its copy with the next update.
+- **Where**: `iCloud Drive/MacMon Indicator/`, one folder per Mac (`info.json`, `history.bin`,
+  `process-history.sqlite.lzfse`, `requests.json`). Each Mac writes only in its own
   folder, so iCloud never has two versions of a file to choose between. A Mac's request for the
   latest is a small file in its own folder that the other Mac watches for.
 - **Your settings apply**: which charts show, their order and the warning limits are this Mac's.
@@ -410,7 +421,7 @@ make app                                                          # build into b
 ```
 
 The tests in `Tests/` cover sharing with other Macs (the shared folder, requests and their
-answers, reading a copy of another Mac's history), the history file (buckets, gaps, restart, reading a file from an older
+answers, reading a copy of another Mac's history and process history), the history file (buckets, gaps, restart, reading a file from an older
 version), how process scans are added up and kept by hour and day, and the process history
 database. They use Swift Testing, which the Command Line Tools include, write only to temporary
 folders, and take their times as arguments, so days of scans run in a moment. GitHub Actions runs

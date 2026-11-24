@@ -39,6 +39,9 @@ enum ThisMac {
 ///         info.json       name, when it was published, the latest reading, top processes,
 ///                         and the requests it answers
 ///         history.bin     a copy of that Mac's history.bin (HistoryStore)
+///         process-history.sqlite.lzfse
+///                         a copy of its process history (ProcessTracker.makeCopy), compressed;
+///                         only while process history is on there
 ///         requests.json   that Mac asking others to publish now, one token per Mac it asks
 ///
 /// Files are written to a temporary file and renamed, so a reader never sees half of one.
@@ -64,6 +67,9 @@ struct ShareFolder {
         var processesTime: Double?
         /// Requester's ID → the token of its newest request that this publish answers.
         var answered: [String: String]
+        /// When the process history copy in the folder was made; nil: there is none (process
+        /// history is off there, or the app is from before it was shared).
+        var processHistory: Double? = nil
     }
 
     struct Request: Codable, Equatable {
@@ -84,19 +90,33 @@ struct ShareFolder {
         var requests: Requests?
         var requestsDate: Date?
         var historyDate: Date?
+        var processDate: Date?
     }
 
-    static let infoFile = "info.json", historyFile = "history.bin", requestsFile = "requests.json"
+    /// What a publish does with the process history copy (1–4 MB, so not sent every time).
+    enum ProcessCopy {
+        case keep
+        case remove
+        case write(Data)
+    }
+
+    static let infoFile = "info.json", historyFile = "history.bin", requestsFile = "requests.json",
+               processFile = "process-history.sqlite.lzfse"
 
     func folder(_ id: String) -> URL { root.appendingPathComponent(id, isDirectory: true) }
 
     // MARK: Writing (only in this Mac's folder)
 
-    /// History first: a Mac that finds the new info.json mostly finds the new history with it.
-    func publish(_ info: Info, history: Data) throws {
+    /// The histories first: a Mac that finds the new info.json mostly finds the new copies with it.
+    func publish(_ info: Info, history: Data, processHistory: ProcessCopy = .keep) throws {
         let dir = folder(me)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try history.write(to: dir.appendingPathComponent(Self.historyFile), options: .atomic)
+        switch processHistory {
+        case .keep: break
+        case .remove: try? FileManager.default.removeItem(at: dir.appendingPathComponent(Self.processFile))
+        case .write(let data): try data.write(to: dir.appendingPathComponent(Self.processFile), options: .atomic)
+        }
         try Self.encoder.encode(info).write(to: dir.appendingPathComponent(Self.infoFile), options: .atomic)
     }
 
@@ -148,6 +168,8 @@ struct ShareFolder {
                     try? h.close()
                 }
             }
+            // Process history is only read when Process History shows that Mac: no download now.
+            e.processDate = Self.date(dir, Self.processFile)
             out[id] = e
         }
         return out
@@ -169,6 +191,15 @@ struct ShareFolder {
         (try? Data(contentsOf: folder(id).appendingPathComponent(Self.historyFile))).flatMap(HistoryStore.init(copy:))
     }
 
+    /// Another Mac's process history, from its copy; nil when it has none or it can't be read.
+    /// Waits for iCloud to download it.
+    func loadProcessHistory(_ id: String) -> ProcessTracker? {
+        guard let packed = try? Data(contentsOf: folder(id).appendingPathComponent(Self.processFile)),
+              let data = try? (packed as NSData).decompressed(using: .lzfse) as Data,
+              let store = ProcessHistoryStore(copy: data) else { return nil }
+        return ProcessTracker(copy: store)
+    }
+
     // MARK: Decisions
 
     /// Another Mac's copy is older than this: looking at it asks for the latest.
@@ -177,10 +208,11 @@ struct ShareFolder {
     static let replyWait: TimeInterval = 300
     static let requestLifetime: TimeInterval = 3600
 
-    /// Whether looking at a Mac now should ask it for the latest: its copy is older than
-    /// `staleAfter` (or missing), and this Mac hasn't asked in the last `staleAfter`.
-    static func shouldAsk(info: Info?, asked: Request?, now: Double) -> Bool {
-        if let info, now - info.published < staleAfter { return false }
+    /// Whether looking at a Mac now should ask it for the latest: its copy (with `processHistory`,
+    /// its process history's) is older than `staleAfter` (or missing), and this Mac hasn't asked
+    /// in the last `staleAfter`.
+    static func shouldAsk(info: Info?, asked: Request?, now: Double, processHistory: Bool = false) -> Bool {
+        if let t = processHistory ? info?.processHistory : info?.published, now - t < staleAfter { return false }
         if let asked, now - asked.time < staleAfter { return false }
         return true
     }
@@ -254,12 +286,17 @@ struct ShareFolder {
 /// before it sleeps or quits, and when another Mac asks, which it does when you look at that Mac
 /// and its copy is older than 5 minutes. Off by default (Settings).
 ///
+/// Process history goes with every publish except the hourly ones, which send it at most every
+/// `processInterval`: it is bigger, and Process History asks for the latest when it shows a Mac.
+///
 /// Main thread only; files are read and written on a queue of its own. A change in the folder
 /// (FSEvents) starts a scan, and so does a check every 5 minutes, in case an event is missed.
 final class OtherMacs {
     static let publishInterval: TimeInterval = 3600
     /// The shortest time between two publishes for requests (or before sleep).
     static let minGap: TimeInterval = 120
+    /// The hourly publish sends process history when the last copy is this old.
+    static let processInterval: TimeInterval = 6 * 3600
 
     /// "iCloud Drive/MacMon Indicator", or nil while iCloud Drive is off. MACMON_INDICATOR_SHARE_DIR:
     /// another folder, for testing (two copies of the app with their own MACMON_INDICATOR_HISTORY_DIR
@@ -286,6 +323,7 @@ final class OtherMacs {
         var latest: Sample?
         var hasBattery: Bool
         var processes: ProcSnapshot?
+        var processHistory: ShareFolder.ProcessCopy = .keep
     }
 
     /// The other Macs that shared, by name.
@@ -293,8 +331,9 @@ final class OtherMacs {
     /// Main queue: the Macs, their copies or what to show about them changed.
     var onChange: (() -> Void)?
     /// Main queue: gathers what to publish and calls `done` once, on the main queue. `quick`:
-    /// right away, without a process scan (before sleep or quit).
-    var snapshot: ((_ quick: Bool, _ done: @escaping (Snapshot) -> Void) -> Void)?
+    /// right away, without a process scan (before sleep or quit). `processHistory`: with a copy
+    /// of process history (or `.remove` while it's off); without, `.keep`.
+    var snapshot: ((_ quick: Bool, _ processHistory: Bool, _ done: @escaping (Snapshot) -> Void) -> Void)?
 
     private let files: ShareFolder
     private let queue = DispatchQueue(label: "MacMonIndicator.otherMacs", qos: .utility)
@@ -306,6 +345,12 @@ final class OtherMacs {
     private var answered: [String: String]
     private var lastPublish: Double
     private var lastProcesses: (snap: ProcSnapshot, time: Double)?
+    /// The last publish with process history (a copy, or none while it's off), and when the copy
+    /// in this Mac's folder was made (0: none).
+    private var lastFull: Double
+    private var processCopy: Double
+    /// The next publish sends process history (an answer, or due).
+    private var wantProcessHistory = false
     private var publishing = false
     private var publishWork: DispatchWorkItem?
     private var scanning = false, scanAgain = false, scannedOnce = false
@@ -318,12 +363,16 @@ final class OtherMacs {
     private var histories: [String: (date: Date?, store: HistoryStore)] = [:]
 
     // With the ID in the name, two copies of the app testing as two Macs keep theirs apart.
-    private static let publishedKey = "otherMacsPublished-\(ThisMac.id)", answeredKey = "otherMacsAnswered-\(ThisMac.id)"
+    private static let publishedKey = "otherMacsPublished-\(ThisMac.id)", answeredKey = "otherMacsAnswered-\(ThisMac.id)",
+                       fullKey = "otherMacsPublishedProcesses-\(ThisMac.id)", processCopyKey = "otherMacsProcessCopy-\(ThisMac.id)"
 
     init(folder: URL) {
         files = ShareFolder(root: folder, me: ThisMac.id)
-        lastPublish = UserDefaults.standard.double(forKey: Self.publishedKey)
-        answered = UserDefaults.standard.dictionary(forKey: Self.answeredKey) as? [String: String] ?? [:]
+        let d = UserDefaults.standard
+        lastPublish = d.double(forKey: Self.publishedKey)
+        answered = d.dictionary(forKey: Self.answeredKey) as? [String: String] ?? [:]
+        lastFull = d.double(forKey: Self.fullKey)
+        processCopy = d.double(forKey: Self.processCopyKey)
     }
 
     deinit { stop(removeMine: false) } // the FSEvents stream points at this object
@@ -363,7 +412,7 @@ final class OtherMacs {
             stream = nil
         }
         if removeMine {
-            UserDefaults.standard.removeObject(forKey: Self.publishedKey)
+            for k in [Self.publishedKey, Self.fullKey, Self.processCopyKey] { UserDefaults.standard.removeObject(forKey: k) }
             queue.async { [files] in files.remove(files.me) }
         }
     }
@@ -378,41 +427,62 @@ final class OtherMacs {
         guard running, !publishing, let snapshot else { return }
         publishing = true
         publishWork?.cancel()
-        snapshot(false) { [weak self] s in self?.write(s, wait: false) }
+        let full = wantProcessHistory
+        snapshot(false, full) { [weak self] s in self?.write(s, full: full, wait: false) }
     }
 
-    /// Before sleep or quit: right away, unless it published in the last 2 minutes. Waits for the
-    /// files to be written; iCloud uploads them after wake if it has no time now.
+    /// Before sleep or quit: right away, with process history, unless the last 2 minutes had such
+    /// a publish. Waits for the files to be written; iCloud uploads them after wake if it has no
+    /// time now.
     func publishNow() {
-        guard running, !publishing, Date().timeIntervalSince1970 - lastPublish >= Self.minGap, let snapshot else { return }
+        guard running, !publishing, Date().timeIntervalSince1970 - lastFull >= Self.minGap, let snapshot else { return }
         publishing = true
-        snapshot(true) { [weak self] s in self?.write(s, wait: true) }
+        snapshot(true, true) { [weak self] s in self?.write(s, full: true, wait: true) }
     }
 
-    private func write(_ s: Snapshot, wait: Bool) {
+    private func write(_ s: Snapshot, full: Bool, wait: Bool) {
         publishing = false
         guard running else { return }
         let now = Date().timeIntervalSince1970
         if let p = s.processes { lastProcesses = (ShareFolder.trim(p), now) }
         if scannedOnce { answered = answered.filter { entries[$0.key] != nil } } // Macs that are gone
-        let info = ShareFolder.Info(id: files.me, name: ThisMac.name, model: ThisMac.model, app: TerminalServer.appVersion,
+        // A copy that couldn't be made is asked for again with the next answer or after 6 hours.
+        if full { wantProcessHistory = false }
+        switch s.processHistory {
+        case .keep: break
+        case .remove: (lastFull, processCopy) = (now, 0)
+        case .write: (lastFull, processCopy) = (now, now)
+        }
+        var info = ShareFolder.Info(id: files.me, name: ThisMac.name, model: ThisMac.model, app: TerminalServer.appVersion,
                                     published: now, hasBattery: s.hasBattery, latest: s.latest?.values ?? [:],
                                     processes: lastProcesses?.snap, processesTime: lastProcesses?.time, answered: answered)
+        info.processHistory = processCopy > 0 ? processCopy : nil
         lastPublish = now
-        UserDefaults.standard.set(now, forKey: Self.publishedKey)
-        UserDefaults.standard.set(answered, forKey: Self.answeredKey)
+        let d = UserDefaults.standard
+        d.set(now, forKey: Self.publishedKey)
+        d.set(answered, forKey: Self.answeredKey)
+        d.set(lastFull, forKey: Self.fullKey)
+        d.set(processCopy, forKey: Self.processCopyKey)
         let job = { [files] in
-            do { try files.publish(info, history: s.history) } catch {
+            do { try files.publish(info, history: s.history, processHistory: s.processHistory) } catch {
                 log.error("sharing with other Macs: \(error.localizedDescription, privacy: .public)")
             }
         }
         if wait { queue.sync(execute: job) } else { queue.async(execute: job) }
+        // A request that came while this publish (without process history) was on its way.
+        if wantProcessHistory { publishSoon() }
     }
 
-    /// Answers requests from other Macs, at most every `minGap`.
+    /// Answers requests from other Macs, with process history.
     private func answer(_ new: [String: String]) {
         guard !new.isEmpty else { return }
         answered.merge(new) { $1 }
+        wantProcessHistory = true
+        publishSoon()
+    }
+
+    /// Publishes now, or `minGap` after the last publish.
+    private func publishSoon() {
         let wait = lastPublish + Self.minGap - Date().timeIntervalSince1970
         guard wait > 0 else { publish(); return }
         publishWork?.cancel()
@@ -447,7 +517,10 @@ final class OtherMacs {
         let now = Date().timeIntervalSince1970
         answer(files.newRequests(found, answered: answered, now: now))
         // A no-op while answering's publish runs.
-        if now - lastPublish >= Self.publishInterval, now >= firstPublish { publish() }
+        if now - lastPublish >= Self.publishInterval, now >= firstPublish {
+            if now - lastFull >= Self.processInterval { wantProcessHistory = true }
+            publish()
+        }
         onChange?()
         if scanAgain {
             scanAgain = false
@@ -455,11 +528,12 @@ final class OtherMacs {
         }
     }
 
-    /// Asks for the latest when you look at a Mac whose copy is old (see ShareFolder.shouldAsk).
-    func lookedAt(_ id: String) {
+    /// Asks for the latest when you look at a Mac whose copy is old (see ShareFolder.shouldAsk):
+    /// its charts, or with `processHistory` its process history.
+    func lookedAt(_ id: String, processHistory: Bool = false) {
         guard running else { return }
         let now = Date().timeIntervalSince1970
-        guard ShareFolder.shouldAsk(info: entries[id]?.info, asked: asks.asks[id], now: now) else { return }
+        guard ShareFolder.shouldAsk(info: entries[id]?.info, asked: asks.asks[id], now: now, processHistory: processHistory) else { return }
         asks.asks[id] = ShareFolder.Request(token: UUID().uuidString, time: now)
         asks.asks = asks.asks.filter { now - $0.value.time < ShareFolder.requestLifetime }
         let r = asks
@@ -469,16 +543,35 @@ final class OtherMacs {
         DispatchQueue.main.asyncAfter(deadline: .now() + ShareFolder.replyWait + 1) { [weak self] in self?.onChange?() }
     }
 
-    func status(_ id: String) -> String {
+    /// How old a Mac's copy is, or that the latest is on its way. With `processHistory`, its
+    /// process history's copy; "" when it has none and none was asked for.
+    func status(_ id: String, processHistory: Bool = false) -> String {
         guard let info = entries[id]?.info else { return "" }
         let now = Date().timeIntervalSince1970
-        return ShareFolder.text(files.status(info, asked: asks.asks[id], now: now), published: info.published, now: now)
+        let status = files.status(info, asked: asks.asks[id], now: now)
+        guard let t = processHistory ? info.processHistory : info.published else { return status == .asking ? "updating…" : "" }
+        return ShareFolder.text(status, published: t, now: now)
     }
 
     /// Changes when a Mac publishes again, or its history file arrives after its info.json.
     func version(_ id: String) -> String {
         let e = entries[id]
         return "\(e?.info?.published ?? 0)/\(e?.historyDate?.timeIntervalSince1970 ?? 0)"
+    }
+
+    /// Changes when a Mac publishes process history again, or its file arrives after its info.json.
+    func processVersion(_ id: String) -> String {
+        let e = entries[id]
+        return "\(e?.info?.processHistory ?? 0)/\(e?.processDate?.timeIntervalSince1970 ?? 0)"
+    }
+
+    /// Another Mac's process history, from its newest copy (nil: none), on the main queue. Not
+    /// kept here: Process History keeps the one it shows.
+    func processHistory(_ id: String, _ done: @escaping (ProcessTracker?) -> Void) {
+        queue.async { [files] in
+            let t = files.loadProcessHistory(id)
+            DispatchQueue.main.async { done(t) }
+        }
     }
 
     /// A copy of another Mac's history, from its newest file. Main queue.

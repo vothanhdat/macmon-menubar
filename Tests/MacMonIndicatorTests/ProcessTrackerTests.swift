@@ -390,6 +390,72 @@ private let hour: Double = (day() / 3600).rounded(.down) * 3600 + 10 * 3600
         #expect(try sim.saved(span: 1, bucket: Int64(day(98))) != nil)
     }
 
+    /// The copy your other Macs read (OtherMacs.swift) gives the same numbers for every range:
+    /// days that have ended, the last 24 hours and the hour not saved yet.
+    @Test func copyForOtherMacsReadsTheSame() throws {
+        let sim = Sim(at: day() + 12 * 3600)
+        var cpu = 100.0
+        sim.scan(cpu: cpu)
+        for i in 1..<(3 * 144 + 5) {
+            sim.advance(600)
+            cpu += 2
+            sim.scan(cpu: cpu, busy: 3, net: i % 7 == 0 ? [Sim.a: .init(received: 1000, sent: 10)] : [:])
+        }
+        let packed = try #require(sim.tracker.queue.sync { sim.tracker.makeCopy(now: sim.wall + 30) })
+        let data = try #require((packed as NSData).decompressed(using: .lzfse) as Data?)
+        let store = try #require(ProcessHistoryStore(copy: data))
+        #expect(store.live().isEmpty)
+        let copy = ProcessTracker(copy: store)
+        #expect(copy.copy?.made == sim.wall + 30)
+        #expect(copy.copy?.lastScan == sim.wall)
+        #expect(copy.copy?.asOf == sim.wall)
+        #expect(copy.copy?.helper == .notUsed)
+        #expect(copy.copy?.batteryWh.map { ($0 * 1000).rounded() } == Battery.capacityWh.map { ($0 * 1000).rounded() })
+
+        func same(_ x: ProcStats, _ y: ProcStats) -> Bool {
+            [\ProcStats.cpu, \.running, \.copyTime, \.ramTime, \.childCpu, \.netIn, \.netOut].allSatisfy { abs(x[keyPath: $0] - y[keyPath: $0]) < 1e-6 }
+                && x.peakCopies == y.peakCopies && x.launches == y.launches
+        }
+        for range in ProcessTracker.Range.allCases {
+            let mine = sim.summary(range), theirs = copy.queue.sync { copy.summarize(range, now: sim.wall) }
+            #expect(theirs.lastScan == mine.lastScan)
+            #expect(theirs.programs.count == mine.programs.count, "\(range)")
+            for p in mine.programs {
+                let t = try #require(theirs.programs.first { $0.path == p.path }?.stats, "\(p.path) \(range)")
+                #expect(same(p.stats, t), "\(p.path) \(range)")
+            }
+            #expect(same(mine.unseen, theirs.unseen))
+            let a = sim.points(range), b = copy.queue.sync { copy.points(Sim.a, range, now: sim.wall) }
+            #expect(a.points.map(\.start) == b.points.map(\.start))
+            #expect(zip(a.points, b.points).allSatisfy { same($0.stats, $1.stats) }, "\(range)")
+        }
+        #expect(sim.a(.week).cpu > sim.a(.last24h).cpu) // daily rows count, not only hours
+
+        // Hours that daily rows have and Today and 24 Hours don't need stay out of the copy.
+        var hours: [Int64] = []
+        store.each(span: 0, from: 0, to: .max) { b, _, _ in hours.append(b) }
+        let first = try #require(hours.min())
+        #expect(Double(first) >= (sim.wall / 3600).rounded(.down) * 3600 - 23 * 3600)
+
+        // A copy never scans or makes copies of its own.
+        copy.start()
+        #expect(copy.queue.sync { copy.makeCopy(now: sim.wall) } == nil)
+        // Not a copy, or one cut short: nil.
+        #expect(ProcessHistoryStore(copy: Data("not a process history file".utf8)) == nil)
+        #expect(ProcessHistoryStore(copy: data.prefix(data.count / 2)) == nil)
+    }
+
+    /// A copy made before the first scan has no last scan; its ranges end when it was made.
+    @Test func copyBeforeAnyScan() throws {
+        let sim = Sim(at: hour + 100)
+        let packed = try #require(sim.tracker.queue.sync { sim.tracker.makeCopy(now: sim.wall) })
+        let data = try #require((packed as NSData).decompressed(using: .lzfse) as Data?)
+        let copy = ProcessTracker(copy: try #require(ProcessHistoryStore(copy: data)))
+        #expect(copy.copy?.lastScan == nil)
+        #expect(copy.copy?.asOf == sim.wall)
+        #expect(copy.queue.sync { copy.summarize(.today, now: sim.wall) }.programs.isEmpty)
+    }
+
     @Test func clearStartsOver() {
         let sim = Sim(at: hour + 100)
         sim.scan(cpu: 100)
