@@ -39,6 +39,9 @@ enum SnapshotMode {
                 busy.ramUsedGB = busy.ramTotalGB * 0.95
                 renderDashboard(history: history, sample: busy, procs: procSnap, hasBattery: source.hasBattery,
                                 appearance: appearance, to: "\(outputDir)/dropdown-warning-\(name).png")
+                // Zoomed in on 15 minutes from 25 to 10 minutes ago, drawn with 10-second buckets.
+                renderZoomed(history: history, sample: s, procs: procSnap, hasBattery: source.hasBattery,
+                             appearance: appearance, to: "\(outputDir)/dropdown-zoomed-\(name).png")
                 // Another Mac's copy (OtherMacs.swift), picked in the row of Macs.
                 renderOtherMac(history: history, sample: s, procs: procSnap,
                                appearance: appearance, to: "\(outputDir)/dropdown-other-mac-\(name).png")
@@ -151,6 +154,19 @@ enum SnapshotMode {
         d.processes.snapshot = procs
         d.onOpenWindow = {} // shows the button, as in the menu
         // Approximates the menu's glass background; the real menu blurs what is behind it.
+        let bg = appearance == .darkAqua ? NSColor(white: 0.2, alpha: 1) : NSColor(white: 0.96, alpha: 1)
+        write(d.snapshotView(), appearance: appearance, background: bg, padding: 0, to: path)
+    }
+
+    /// The menu with the charts zoomed into part of the range tab (ChartZoom.swift).
+    private static func renderZoomed(history: HistoryStore, sample: Sample, procs: ProcSnapshot?, hasBattery: Bool,
+                                     appearance: NSAppearance.Name, to path: String) {
+        let d = Dashboard(history: history, latest: sample, hasBattery: hasBattery)
+        d.update(sample: sample)
+        d.processes.snapshot = procs
+        d.onOpenWindow = {}
+        let now = Date().timeIntervalSince1970
+        d.charts.applyRange(ChartZoom.selected(from: now - 25 * 60, to: now - 10 * 60, now: now))
         let bg = appearance == .darkAqua ? NSColor(white: 0.2, alpha: 1) : NSColor(white: 0.96, alpha: 1)
         write(d.snapshotView(), appearance: appearance, background: bg, padding: 0, to: path)
     }

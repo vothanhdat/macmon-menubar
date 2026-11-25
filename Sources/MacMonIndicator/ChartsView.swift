@@ -43,6 +43,9 @@ struct ChartLayout: Equatable {
 /// under the pointer labels them, with the time under the cursor highlighted on the same line.
 /// Hovering shows the values at that moment in every cell;
 /// clicking a chart shows it alone at full size, and another click goes back to the grid.
+/// Scrolling (wheel or trackpad) or pinching zooms in and out in time around the pointer,
+/// scrolling sideways moves through time, and dragging across a chart zooms into that range; all
+/// charts show the same range (ChartZoom.swift). A range tab goes back to its whole window.
 ///
 /// The bars change only when data arrives (once a second while the menu is open), but the pointer
 /// can move 120 times a second. So the cursor and the values live in a separate overlay layer, and
@@ -113,7 +116,12 @@ final class ChartsView: NSView {
         }
     }
     var layout = ChartLayout() { didSet { contentChanged() } }
+    /// The range tab: its whole window shows, unless zoomed in (`timeZoom`).
     var tier = 0 { didSet { contentChanged() } }
+    /// A zoomed-in range (ChartZoom.swift), or nil for the tab's whole window.
+    private(set) var timeZoom: ChartZoom? { didSet { if timeZoom != oldValue { contentChanged() } } }
+    /// Called after a gesture changed the range: zoomed, or onto another tab (`tier`).
+    var onRangeChange: (() -> Void)?
     var latest: Sample? { didSet { contentChanged() } }
     var history: HistoryStore? { didSet { contentChanged() } }
     /// For another Mac's charts: when its copy was made (OtherMacs.swift); nil for this Mac's.
@@ -207,6 +215,19 @@ final class ChartsView: NSView {
         updateOverlay()
     }
 
+    /// Shows a tab's whole window (a tab was clicked).
+    func showTier(_ t: Int) {
+        hoverIndex = nil
+        timeZoom = nil
+        tier = t
+    }
+
+    /// The range on screen now, and the tier whose buckets show it.
+    private func viewport(_ now: TimeInterval) -> Viewport { Viewport(tier: tier, zoom: timeZoom, now: now) }
+
+    /// The length of the buckets on screen (the tab's, or a finer tier's when zoomed in).
+    var shownBucket: TimeInterval { viewport(now).bucket }
+
     /// Another Mac's copy gets no new samples, but its charts still move on with the clock: called
     /// with each of this Mac's samples (once a second while the charts show).
     func timePassed() { contentChanged() }
@@ -249,9 +270,9 @@ final class ChartsView: NSView {
     }
 
     /// The hover cursor of bucket `h`.
-    fileprivate func cursorRect(_ c: Cell, _ h: Int) -> CGRect {
-        let bw = c.chart.width / CGFloat(HistoryStore.tiers[tier].capacity)
-        return CGRect(x: c.chart.minX + (CGFloat(h) + 0.5) * bw - 0.5, y: c.chart.minY - 1, width: 1, height: c.chart.height + 2)
+    fileprivate func cursorRect(_ c: Cell, _ h: Int, _ vp: Viewport) -> CGRect {
+        let x = vp.x(index: h, in: c.chart) + vp.bucketWidth(in: c.chart) / 2
+        return CGRect(x: x - 0.5, y: c.chart.minY - 1, width: 1, height: c.chart.height + 2)
     }
 
     // MARK: - Mouse
@@ -265,21 +286,44 @@ final class ChartsView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        let cap = HistoryStore.tiers[tier].capacity
+        let vp = viewport(now)
         // All charts share one time axis, so only the x position within a column matters.
-        hoverIndex = cells().first { p.x >= $0.chart.minX && p.x < $0.chart.maxX }
-            .map { min(cap - 1, max(0, Int((p.x - $0.chart.minX) / $0.chart.width * CGFloat(cap)))) }
+        hoverIndex = column(p.x).map { vp.index(atX: p.x, in: $0.chart) }
         hoverChart = cells().first { $0.frame.contains(p) }?.row.id
     }
+
+    /// The chart in the column at `x`.
+    private func column(_ x: CGFloat) -> Cell? { cells().first { x >= $0.chart.minX && x < $0.chart.maxX } }
 
     override func mouseExited(with event: NSEvent) {
         hoverIndex = nil
         hoverChart = nil
     }
 
-    // Menus deliver mouseUp to custom item views and stay open.
+    override func mouseDown(with event: NSEvent) {
+        pressX = convert(event.locationInWindow, from: nil).x
+    }
+
+    /// Dragging across a chart picks a range to zoom into; a band shows it on every chart.
+    override func mouseDragged(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        mouseMoved(with: event) // the cursor follows: no moves come while the button is down
+        let start = pressX ?? p.x // in case a menu doesn't deliver mouseDown
+        pressX = start
+        guard selection != nil || abs(p.x - start) >= Self.dragDistance, let c = column(start) else { return }
+        let vp = viewport(now)
+        let x = min(c.chart.maxX, max(c.chart.minX, p.x))
+        selection = (vp.time(atX: start, in: c.chart), vp.time(atX: x, in: c.chart))
+    }
+
+    // Menus deliver mouseUp to custom item views and stay open. A click shows the chart alone or
+    // goes back to the grid; the end of a drag zooms into the range dragged across.
     override func mouseUp(with event: NSEvent) {
-        if zoomed != nil {
+        pressX = nil
+        if let s = selection {
+            selection = nil
+            applyRange(ChartZoom.selected(from: s.from, to: s.to, now: now))
+        } else if zoomed != nil {
             zoomed = nil
         } else {
             let p = convert(event.locationInWindow, from: nil)
@@ -287,6 +331,83 @@ final class ChartsView: NSView {
             zoomed = c.row.id
         }
         mouseMoved(with: event) // the cursor at the pointer, in the new layout
+    }
+
+    // MARK: - Zooming in time
+
+    /// A drag shorter than this is a click.
+    private static let dragDistance: CGFloat = 4
+    /// Where the button went down, while it is.
+    private var pressX: CGFloat?
+    /// The range being dragged across, as times.
+    private var selection: (from: TimeInterval, to: TimeInterval)? { didSet { updateBand() } }
+
+    /// Scrolling up and down zooms in and out around the pointer; sideways it moves through time.
+    override func scrollWheel(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        // Not the glide after the fingers lift: it would zoom much further than meant.
+        guard event.momentumPhase.isEmpty else { return }
+        guard let c = column(p.x) else { super.scrollWheel(with: event); return }
+        let dx = Double(event.scrollingDeltaX), dy = Double(event.scrollingDeltaY)
+        let now = self.now, vp = viewport(now)
+        // A mouse wheel moves in lines, a trackpad in points.
+        let precise = event.hasPreciseScrollingDeltas
+        if abs(dx) > abs(dy) {
+            let points = precise ? dx : dx * 10
+            applyRange(ChartZoom.panned(current(vp), by: -points / Double(c.chart.width) * vp.span, now: now))
+        } else if dy != 0 {
+            let factor = exp(-dy * (precise ? 0.01 : 0.15))
+            applyRange(ChartZoom.zoomed(current(vp), by: factor, around: vp.time(atX: p.x, in: c.chart), now: now))
+        }
+        mouseMoved(with: event)
+    }
+
+    /// Pinching zooms around the pointer too.
+    override func magnify(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard let c = column(p.x), event.magnification > -0.9 else { return }
+        let now = self.now, vp = viewport(now)
+        applyRange(ChartZoom.zoomed(current(vp), by: 1 / (1 + Double(event.magnification)),
+                               around: vp.time(atX: p.x, in: c.chart), now: now))
+        mouseMoved(with: event)
+    }
+
+    /// A two-finger double tap goes back to the tab's whole window.
+    override func smartMagnify(with event: NSEvent) {
+        guard timeZoom != nil else { return }
+        applyRange(.tier(tier))
+        mouseMoved(with: event)
+    }
+
+    private func current(_ vp: Viewport) -> ChartZoom.Current {
+        ChartZoom.Current(start: vp.start, span: vp.span, live: timeZoom?.live ?? true)
+    }
+
+    /// Shows the range a gesture led to (snapshots use it too), and tells `onRangeChange`.
+    func applyRange(_ r: ChartZoom.Result) {
+        switch r {
+        case .zoom(let z):
+            guard z != timeZoom else { return }
+            hoverIndex = nil
+            timeZoom = z
+        case .tier(let t):
+            guard t != tier || timeZoom != nil else { return }
+            showTier(t)
+        }
+        onRangeChange?()
+    }
+
+    /// Shows the range being dragged across as a band on every chart, or hides it.
+    private func updateBand() {
+        guard window != nil else { return }
+        let vp = viewport(now)
+        for (c, l) in zip(cells(), overlay.cells) {
+            guard let s = selection else { l.band.isHidden = true; continue }
+            let a = max(c.chart.minX, vp.x(min(s.from, s.to), in: c.chart))
+            let b = min(c.chart.maxX, vp.x(max(s.from, s.to), in: c.chart))
+            l.band.frame = CGRect(x: a, y: c.chart.minY, width: max(0, b - a), height: c.chart.height)
+            l.band.isHidden = false
+        }
     }
 
     // MARK: - Drawing
@@ -300,36 +421,42 @@ final class ChartsView: NSView {
         let t0 = MemoryProbe.enabled ? CACurrentMediaTime() : 0
         defer { if MemoryProbe.enabled { Self.drawStats.count += 1; Self.drawStats.seconds += CACurrentMediaTime() - t0 } }
         guard let ctx = NSGraphicsContext.current?.cgContext, let history else { return }
-        let now = self.now
-        let cap = HistoryStore.tiers[tier].capacity
+        let now = self.now, vp = viewport(now)
+        let cap = HistoryStore.tiers[vp.tier].capacity
         let thresholds = Settings.shared.thresholds
         fitScale = Settings.shared.zoomCharts
         let isZoomed = zoomed != nil, offscreen = window == nil
-        let span = HistoryStore.tiers[tier].bucket * Double(cap)
-        let start = history.bucketStart(tier: tier, index: 0, now: now)
-        let ticks = timeTicks(from: start, span: span)
+        let ticks = timeTicks(from: vp.start, span: vp.span)
         let px = 1 / (window?.backingScaleFactor ?? 2)
         // A light menu turns grey over a dark wallpaper, and the faint fills go grey with it. A
         // white backing under the bars, fading out toward the base, keeps the fills light; over a
         // light wallpaper it changes next to nothing. Windows have an opaque background and skip it.
         let lightMenu = enclosingMenuItem != nil && effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
-        let unsynced = Self.firstUnsynced(tier: tier, syncedUntil: syncedUntil, now: now)
+        let unsynced = Self.firstUnsynced(tier: vp.tier, syncedUntil: syncedUntil, now: now)
+        let wholeWindow = vp.first == 0 && vp.last == cap - 1
 
         for c in cells() {
             let row = c.row, rect = c.chart
-            let bw = rect.width / CGFloat(cap)
+            let bw = vp.bucketWidth(in: rect), x0 = vp.x(index: vp.first, in: rect)
 
             (row.title as NSString).draw(at: NSPoint(x: c.origin.x, y: c.origin.y - 1),
                                          withAttributes: [.font: titleFont, .foregroundColor: NSColor.secondaryLabelColor])
 
-            history.window(tier: tier, series: row.series, now: now, avg: &avgBuf, max: &maxBuf)
+            history.window(tier: vp.tier, series: row.series, now: now, avg: &avgBuf, max: &maxBuf)
             if case .mirrored(let down) = row.shape {
-                history.window(tier: tier, series: down, now: now, avg: &avgBuf2, max: &maxBuf2)
+                history.window(tier: vp.tier, series: down, now: now, avg: &avgBuf2, max: &maxBuf2)
             }
             // Nothing after the copy, not even a short hole filled from the bucket before it.
             for i in unsynced..<cap {
                 avgBuf[i] = .nan; maxBuf[i] = .nan
                 if case .mirrored = row.shape { avgBuf2[i] = .nan; maxBuf2[i] = .nan }
+            }
+            // Zoomed in: only the buckets on screen, so the scales fit what shows.
+            if !wholeWindow {
+                avgBuf = Array(avgBuf[vp.first...vp.last]); maxBuf = Array(maxBuf[vp.first...vp.last])
+                if case .mirrored = row.shape {
+                    avgBuf2 = Array(avgBuf2[vp.first...vp.last]); maxBuf2 = Array(maxBuf2[vp.first...vp.last])
+                }
             }
             var r = range(row)
             // Both halves of a mirrored chart (reads and writes, received and sent) share one
@@ -344,15 +471,15 @@ final class ChartsView: NSView {
             func bars(backing: Bool) {
                 switch row.shape {
                 case .up:
-                    drawBars(ctx, rect, bw, avgBuf, maxBuf, r.lo, r.hi, row.color, from: .bottom,
+                    drawBars(ctx, rect, x0, bw, avgBuf, maxBuf, r.lo, r.hi, row.color, from: .bottom,
                              warn: warnRange(row, limit: limit), backing: backing)
                 case .signed:
-                    drawBars(ctx, rect, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .center, backing: backing)
+                    drawBars(ctx, rect, x0, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .center, backing: backing)
                 case .mirrored:
                     var top = rect; top.size.height /= 2
                     var bottom = top; bottom.origin.y += top.height
-                    drawBars(ctx, top, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .bottom, backing: backing)
-                    drawBars(ctx, bottom, bw, avgBuf2, maxBuf2, 0, lowerHi, row.color2 ?? row.color, from: .top, backing: backing)
+                    drawBars(ctx, top, x0, bw, avgBuf, maxBuf, 0, r.hi, row.color, from: .bottom, backing: backing)
+                    drawBars(ctx, bottom, x0, bw, avgBuf2, maxBuf2, 0, lowerHi, row.color2 ?? row.color, from: .top, backing: backing)
                 }
             }
 
@@ -363,16 +490,17 @@ final class ChartsView: NSView {
             ctx.clip()
             if lightMenu { bars(backing: true) }
             // The tint shows where there is data, or could be; the part not synced yet is grey.
-            let syncX = unsynced == cap ? rect.maxX : ((rect.minX + CGFloat(unsynced) * bw) / px).rounded() * px
+            let syncX = unsynced == cap ? rect.maxX
+                : min(rect.maxX, max(rect.minX, (vp.x(index: unsynced, in: rect) / px).rounded() * px))
             ctx.setFillColor(row.color.withAlphaComponent(0.08).cgColor)
             ctx.fill(CGRect(x: rect.minX, y: rect.minY, width: syncX - rect.minX, height: rect.height))
             let unsyncedRect = CGRect(x: syncX, y: rect.minY, width: rect.maxX - syncX, height: rect.height)
-            if unsynced < cap { drawUnsynced(ctx, unsyncedRect, px: px) }
+            if syncX < rect.maxX { drawUnsynced(ctx, unsyncedRect, px: px) }
 
             // Time gridlines, one device pixel wide, under the bars.
             ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.1).cgColor)
             for t in ticks {
-                ctx.fill(CGRect(x: tickX(t, in: rect, start: start, span: span, px: px), y: rect.minY, width: px, height: rect.height))
+                ctx.fill(CGRect(x: tickX(t, in: rect, start: vp.start, span: vp.span, px: px), y: rect.minY, width: px, height: rect.height))
             }
 
             bars(backing: false)
@@ -391,7 +519,7 @@ final class ChartsView: NSView {
             // bottom mean. Charts whose scale follows the data or the Mac show it, as does a zoomed chart.
             // None while all of the window is after another Mac's copy: there is nothing to scale.
             var top: String?, bottom: String?
-            if let fmt = row.axisLabel, unsynced > 0 {
+            if let fmt = row.axisLabel, syncX > rect.minX {
                 if r.dataMin.isFinite, r.dataMax.isFinite {
                     top = fmt(r.dataMax); bottom = fmt(r.dataMin)
                 } else if isZoomed || Self.labelsScale(row.scale) {
@@ -411,7 +539,7 @@ final class ChartsView: NSView {
                 bottomText = bottom
             }
             bottomLabels[row.id] = bottomText
-            if unsynced < cap {
+            if syncX < rect.maxX {
                 let chip = values(row, now: now, thresholds: thresholds).chip.map { chipRect($0, in: rect) }
                 drawUnsyncedNote(ctx, in: unsyncedRect, avoiding: chip)
             }
@@ -488,24 +616,19 @@ final class ChartsView: NSView {
 
     /// A gridline at a local clock time, with its label.
     private struct Tick { let time: TimeInterval; let label: String; let width: CGFloat }
-    /// Ticks only change when the window moves on by a bucket.
-    private var tickCache: (tier: Int, start: TimeInterval, ticks: [Tick])?
+    /// Ticks only change when the range moves on.
+    private var tickCache: (start: TimeInterval, span: TimeInterval, ticks: [Tick])?
 
-    /// Ticks for the window starting at `start`, on local wall-clock boundaries: every 10 seconds
-    /// for 1m, every minute for 5m, 10 minutes for 1h, 4 hours for 24h ("0h", "4h"…), and for 7d
-    /// every midnight, for 30d the 5th, 10th, 15th… of the month, labeled with the day ("10").
+    /// Ticks for the range from `start`, on local wall-clock boundaries, at most 7 (see
+    /// Viewport.tickStep): every 10 seconds for 1m, every minute for 5m, 10 minutes for 1h, 4 hours
+    /// for 24h ("0h", "4h"…), and for 7d every midnight, for 30d the 5th, 10th, 15th… of the month,
+    /// labeled with the day ("10"). Zoomed-in ranges get the step that fits their length.
     private func timeTicks(from start: TimeInterval, span: TimeInterval) -> [Tick] {
-        if let c = tickCache, c.tier == tier, c.start == start { return c.ticks }
-        let label = HistoryStore.tiers[tier].label
-        let step: TimeInterval
-        switch label {
-        case "1m": step = 10
-        case "5m": step = 60
-        case "1h": step = 600
-        case "24h": step = 4 * 3600
-        case "7d", "30d": step = 86400
-        default: return []
-        }
+        if let c = tickCache, c.start == start, c.span == span { return c.ticks }
+        let full = Viewport.tickStep(span: span)
+        // Steps of several days go a day at a time, labeling the days that divide by it.
+        let everyDays = full > 86400 ? Int(full / 86400) : 1
+        let step = min(full, 86400)
         let tz = TimeZone.current
         func offset(_ t: TimeInterval) -> TimeInterval { TimeInterval(tz.secondsFromGMT(for: Date(timeIntervalSince1970: t))) }
         func hhmm(_ s: Int) -> String { String(format: "%02d:%02d", s / 3600, s / 60 % 60) }
@@ -519,18 +642,20 @@ final class ChartsView: NSView {
             guard t >= start, t > ticks.last?.time ?? -.infinity else { continue }
             let s = Int(wall.truncatingRemainder(dividingBy: 86400)) // seconds into the local day
             let text: String
-            switch label {
-            case "1m": text = s % 60 == 0 ? hhmm(s) : String(format: ":%02d", s % 60)
-            case "24h": text = "\(s / 3600)h"
-            case "7d", "30d":
+            if step < 60 {
+                text = s % 60 == 0 ? hhmm(s) : String(format: ":%02d", s % 60)
+            } else if step < 3600 {
+                text = hhmm(s)
+            } else if step < 86400 {
+                text = "\(s / 3600)h"
+            } else {
                 let day = Calendar.current.component(.day, from: Date(timeIntervalSince1970: t))
-                guard label == "7d" || day % 5 == 0 else { continue }
+                guard day % everyDays == 0 else { continue }
                 text = String(day)
-            default: text = hhmm(s)
             }
             ticks.append(Tick(time: t, label: text, width: ceil((text as NSString).size(withAttributes: timeAttrs).width)))
         }
-        tickCache = (tier, start, ticks)
+        tickCache = (start, span, ticks)
         return ticks
     }
 
@@ -545,9 +670,7 @@ final class ChartsView: NSView {
     /// than the scale labels. The value chip shows over them. One that would run onto the bottom
     /// scale label, past the chart or onto the label before it is left out.
     private func timeLabels(in rect: CGRect, bottomLabel: String?, now: TimeInterval) -> [TimeLabel] {
-        guard let history else { return [] }
-        let span = HistoryStore.tiers[tier].bucket * Double(HistoryStore.tiers[tier].capacity)
-        let start = history.bucketStart(tier: tier, index: 0, now: now)
+        let vp = viewport(now), start = vp.start, span = vp.span
         let px = 1 / (window?.backingScaleFactor ?? 2)
         var lastMaxX = max(rect.minX - 1, bottomLabel.map { axisLabelBox($0, in: rect, atTop: false).maxX } ?? -.infinity)
         var labels: [TimeLabel] = []
@@ -579,13 +702,12 @@ final class ChartsView: NSView {
     /// line and kept inside the chart: seconds for buckets under a minute, the day of the month
     /// from 30-minute buckets (7d, 30d) on.
     private func cursorTimeLabel(_ c: Cell, _ h: Int, now: TimeInterval) -> TimeLabel? {
-        guard let history else { return nil }
-        let bucket = HistoryStore.tiers[tier].bucket
+        let vp = viewport(now), bucket = vp.bucket
         let f = bucket < 60 ? Self.cursorTimeFormatters.seconds : bucket < 1800 ? Self.cursorTimeFormatters.minutes
             : Self.cursorTimeFormatters.days
-        let text = f.string(from: Date(timeIntervalSince1970: history.bucketStart(tier: tier, index: h, now: now)))
+        let text = f.string(from: Date(timeIntervalSince1970: vp.windowStart + Double(h) * bucket))
         let w = ceil((text as NSString).size(withAttributes: timeAttrs).width) + 3
-        let x = min(max(c.chart.minX + 1, cursorRect(c, h).midX - w / 2), c.chart.maxX - 1 - w)
+        let x = min(max(c.chart.minX + 1, cursorRect(c, h, vp).midX - w / 2), c.chart.maxX - 1 - w)
         return TimeLabel(text: text, box: CGRect(x: x, y: c.chart.maxY - timeLabelH - 1.5, width: w, height: timeLabelH))
     }
 
@@ -643,11 +765,12 @@ final class ChartsView: NSView {
     /// Values at the hovered moment, or live.
     private func values(_ row: Row, now: TimeInterval, thresholds: Thresholds) -> Values {
         let value: (Series) -> Float, live: Sample?
-        if let h = hoverIndex, h >= Self.firstUnsynced(tier: tier, syncedUntil: syncedUntil, now: now) {
+        let dataTier = viewport(now).tier
+        if let h = hoverIndex, h >= Self.firstUnsynced(tier: dataTier, syncedUntil: syncedUntil, now: now) {
             value = { _ in .nan } // after another Mac's copy: nothing yet
             live = nil
         } else if let h = hoverIndex, let history {
-            value = { history.value(tier: self.tier, series: $0, index: h, now: now) }
+            value = { history.value(tier: dataTier, series: $0, index: h, now: now) }
             live = nil
         } else {
             let l = latest
@@ -679,13 +802,15 @@ final class ChartsView: NSView {
         lastHoverValues = CACurrentMediaTime()
         updateOverlay()
         let now = self.now
-        onHover?(hoverIndex.flatMap { history?.bucketStart(tier: tier, index: $0, now: now) })
+        let vp = viewport(now)
+        onHover?(hoverIndex.map { vp.windowStart + Double($0) * vp.bucket })
     }
 
     private func updateCursors() {
         guard window != nil else { return }
+        let vp = viewport(now)
         for (c, l) in zip(cells(), overlay.cells) {
-            if let h = hoverIndex { l.cursor.frame = cursorRect(c, h) }
+            if let h = hoverIndex { l.cursor.frame = cursorRect(c, h, vp) }
             l.cursor.isHidden = hoverIndex == nil
         }
     }
@@ -696,10 +821,10 @@ final class ChartsView: NSView {
         // Offscreen (snapshots) there are no layers to show; draw(_:) draws the values then.
         overlay.isHidden = window == nil
         guard window != nil else { return }
-        let cs = cells(), now = self.now, thresholds = Settings.shared.thresholds
+        let cs = cells(), now = self.now, thresholds = Settings.shared.thresholds, vp = viewport(now)
         overlay.prepare(count: cs.count)
         for (c, l) in zip(cs, overlay.cells) {
-            if let h = hoverIndex { l.cursor.frame = cursorRect(c, h) }
+            if let h = hoverIndex { l.cursor.frame = cursorRect(c, h, vp) }
             l.cursor.isHidden = hoverIndex == nil
             let v = values(c.row, now: now, thresholds: thresholds)
             guard v != l.values || c.chart != l.chart || c.origin != l.origin else { continue }
@@ -712,6 +837,7 @@ final class ChartsView: NSView {
             l.chip.show(chip?.rect) { [weak self] in if let chip { self?.drawChip(chip.text, at: chip.rect, hot: v.hot) } }
         }
         updateTimeLabels()
+        updateBand()
     }
 
     /// The label-row values, laid out right-aligned on the label row.
@@ -752,7 +878,8 @@ final class ChartsView: NSView {
     /// layers, redrawn when their text changes.
     private final class Overlay: LayerHostView {
         final class CellLayers {
-            let cursor = StillLayer(), label: TextLayer, chip: TextLayer
+            /// `band` shows the range being dragged across, under the bars' read-outs.
+            let cursor = StillLayer(), band = StillLayer(), label: TextLayer, chip: TextLayer
             var values: Values?
             var chart = CGRect.null, origin = CGPoint.zero
             init(label: TextLayer, chip: TextLayer) { self.label = label; self.chip = chip }
@@ -776,12 +903,15 @@ final class ChartsView: NSView {
             guard cells.count != count else { return }
             while cells.count > count {
                 let c = cells.removeLast()
-                [c.cursor, c.label, c.chip].forEach { $0.removeFromSuperlayer() }
+                [c.cursor, c.band, c.label, c.chip].forEach { $0.removeFromSuperlayer() }
             }
             while cells.count < count {
                 let c = CellLayers(label: addTextLayer(), chip: addTextLayer())
                 c.cursor.isHidden = true
+                c.band.isHidden = true
+                c.band.zPosition = -2
                 layer?.addSublayer(c.cursor)
+                layer?.addSublayer(c.band)
                 cells.append(c)
             }
             restyle()
@@ -791,7 +921,8 @@ final class ChartsView: NSView {
             super.restyle()
             effectiveAppearance.performAsCurrentDrawingAppearance {
                 let color = NSColor.labelColor.withAlphaComponent(0.6).cgColor
-                for c in cells { c.cursor.backgroundColor = color }
+                let band = NSColor.controlAccentColor.withAlphaComponent(0.22).cgColor
+                for c in cells { c.cursor.backgroundColor = color; c.band.backgroundColor = band }
             }
         }
     }
@@ -873,6 +1004,7 @@ final class ChartsView: NSView {
 
     /// Bars per bucket, no smoothing: a faint layer for the bucket max, a gradient fill for the
     /// average (strong at the tip, nearly clear at the base), and a crisp stepped edge on top.
+    /// Bar `i` starts at `x0 + i * bw`; zoomed in, the first and last can reach past the chart.
     ///
     /// With a warning range (`warn`), the color follows the value: the chart's color below
     /// `start`, blending into red up to `limit`, red from there up. It depends on the value, not on
@@ -880,7 +1012,7 @@ final class ChartsView: NSView {
     ///
     /// With `backing`, it only fills the area the bars cover (peaks and average) with white, fading
     /// from `menuBacking` at full height to clear at the base.
-    private func drawBars(_ ctx: CGContext, _ rect: CGRect, _ bw: CGFloat, _ avg: [Float], _ mx: [Float],
+    private func drawBars(_ ctx: CGContext, _ rect: CGRect, _ x0: CGFloat, _ bw: CGFloat, _ avg: [Float], _ mx: [Float],
                           _ lo: Float, _ hi: Float, _ color: NSColor, from anchor: Anchor,
                           warn: (start: Float, limit: Float)? = nil, backing: Bool = false) {
         guard hi > lo else { return }
@@ -904,7 +1036,7 @@ final class ChartsView: NSView {
             }
         }
         func barRect(_ i: Int, _ v: Float) -> CGRect {
-            let x = rect.minX + CGFloat(i) * bw, t = tip(v)
+            let x = x0 + CGFloat(i) * bw, t = tip(v)
             switch anchor {
             case .bottom: return CGRect(x: x, y: t, width: width, height: rect.maxY - t)
             case .top: return CGRect(x: x, y: rect.minY, width: width, height: t - rect.minY)
@@ -990,7 +1122,7 @@ final class ChartsView: NSView {
         let edge = CGMutablePath()
         var last = -2
         for (i, v) in avg.enumerated() where v.isFinite {
-            let x = rect.minX + CGFloat(i) * bw, y = tip(v)
+            let x = x0 + CGFloat(i) * bw, y = tip(v)
             if i == last + 1 { edge.addLine(to: CGPoint(x: x, y: y)) } else { edge.move(to: CGPoint(x: x, y: y)) }
             edge.addLine(to: CGPoint(x: x + bw, y: y))
             last = i

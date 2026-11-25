@@ -135,9 +135,19 @@ final class Dashboard {
         name.count > 16 ? String(name.prefix(15)) + "…" : name
     }
 
-    /// What the range row says while the pointer isn't over the charts: "Now", or when another
-    /// Mac's copy was made and how old it is ("10:15 · 40 min ago"; an older one: "2 days ago").
+    /// The charts' range changed: a tab, or zoomed in. Zoomed, the tab it came from stays lit
+    /// faintly, and clicking it goes back.
+    private func rangeChanged() {
+        tierBar.selected = charts.tier
+        tierBar.dimmed = charts.timeZoom != nil
+        if !hovering { tierBar.timeText = restingTime }
+    }
+
+    /// What the range row says while the pointer isn't over the charts: the zoomed-in range;
+    /// "Now"; or when another Mac's copy was made and how old it is ("10:15 · 40 min ago"; an
+    /// older one: "2 days ago").
     private var restingTime: String {
+        if let z = charts.timeZoom { return Self.rangeText(z, now: Date().timeIntervalSince1970) }
         guard let id = shownMac, let t = charts.syncedUntil else { return "Now" }
         let status = macStatus?(id) ?? ""
         let date = Date(timeIntervalSince1970: t)
@@ -148,9 +158,24 @@ final class Dashboard {
         return status.isEmpty ? time : "\(time) · \(status)"
     }
 
-    /// The age of another Mac's copy, or of a request to it, changed.
+    /// The age of another Mac's copy, or of a request to it, changed; or time moved a zoomed-in
+    /// range on.
     func updateMacStatus() {
-        if shownMac != nil, !hovering { tierBar.timeText = restingTime }
+        if shownMac != nil || charts.timeZoom != nil, !hovering { tierBar.timeText = restingTime }
+    }
+
+    private static let rangeFormatter = DateFormatter()
+
+    /// A zoomed-in range: "14:02–14:20", "14:02:10–now", "Mon 22:00–Tue 01:30", "3 Nov–8 Nov".
+    static func rangeText(_ z: ChartZoom, now: TimeInterval) -> String {
+        let start = z.start(now: now), end = start + z.span
+        let a = Date(timeIntervalSince1970: start), b = Date(timeIntervalSince1970: end), cal = Calendar.current
+        let format = z.span >= 2 * 86400 ? "d MMM"
+            : !cal.isDateInToday(a) || !cal.isDateInToday(b) ? "EEE HH:mm"
+            : z.span < 600 ? "HH:mm:ss" : "HH:mm"
+        let f = rangeFormatter
+        if f.dateFormat != format { f.dateFormat = format } // setting it re-parses the format
+        return f.string(from: a) + "–" + (z.live ? "now" : f.string(from: b))
     }
 
     // MARK: -
@@ -169,9 +194,18 @@ final class Dashboard {
         let tier = HistoryStore.tiers.firstIndex { $0.label == saved } ?? 0
         charts.tier = tier
         tierBar.selected = tier
+        // A tab shows its whole window; clicking the one that's zoomed into goes back to it.
         tierBar.onSelect = { [weak self] i in
-            self?.charts.tier = i
+            self?.charts.showTier(i)
+            self?.rangeChanged()
             UserDefaults.standard.set(HistoryStore.tiers[i].label, forKey: "historyRange")
+        }
+        charts.onRangeChange = { [weak self] in
+            guard let self else { return }
+            // Zooming out onto another tab chooses that tab, as clicking it would.
+            let tabChanged = tierBar.selected != charts.tier
+            rangeChanged()
+            if tabChanged { UserDefaults.standard.set(HistoryStore.tiers[charts.tier].label, forKey: "historyRange") }
         }
         charts.onHover = { [weak self] t in self?.showTime(t) }
         charts.onZoom = { [weak self] in self?.reflow() }
@@ -318,13 +352,13 @@ final class Dashboard {
     private func showTime(_ t: TimeInterval?) {
         hovering = t != nil
         guard let t else { tierBar.timeText = restingTime; return }
-        let tier = charts.tier
-        let short = HistoryStore.tiers[tier].bucket < 60
-        let format = short ? "HH:mm:ss" : (HistoryStore.tiers[tier].bucket < 1800 ? "HH:mm" : "EEE d MMM HH:mm")
+        let bucket = charts.shownBucket // a zoomed-in range can show a finer tier's buckets
+        let short = bucket < 60
+        let format = short ? "HH:mm:ss" : (bucket < 1800 ? "HH:mm" : "EEE d MMM HH:mm")
         if timeFormatter.dateFormat != format { timeFormatter.dateFormat = format } // setting it re-parses the format
         let start = timeFormatter.string(from: Date(timeIntervalSince1970: t))
-        if HistoryStore.tiers[tier].bucket > 1 && HistoryStore.tiers[tier].bucket < 1800 {
-            let end = timeFormatter.string(from: Date(timeIntervalSince1970: t + HistoryStore.tiers[tier].bucket))
+        if bucket > 1 && bucket < 1800 {
+            let end = timeFormatter.string(from: Date(timeIntervalSince1970: t + bucket))
             tierBar.timeText = start == end ? start : "\(start)–\(end)"
         } else {
             tierBar.timeText = start
@@ -367,6 +401,9 @@ final class TierBar: NSView {
     var labels = HistoryStore.tiers.map(\.label) { didSet { if labels != oldValue { needsDisplay = true } } }
     /// Clicking the selected tab calls `onSelect` again (to ask another Mac for the latest).
     var reselects = false
+    /// The selected tab is lit faintly (the charts are zoomed into part of it), and clicking it
+    /// calls `onSelect` again.
+    var dimmed = false { didSet { if dimmed != oldValue { needsDisplay = true } } }
     private let font = NSFont.systemFont(ofSize: 12, weight: .medium)
     private let timeAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
                                                             .foregroundColor: NSColor.secondaryLabelColor]
@@ -419,14 +456,14 @@ final class TierBar: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         for (i, r) in tabRects().enumerated() {
-            let isSel = i == selected
+            let isSel = i == selected, lit = isSel && !dimmed
             if isSel {
-                NSColor.controlAccentColor.setFill()
+                NSColor.controlAccentColor.withAlphaComponent(dimmed ? 0.22 : 1).setFill()
                 NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
             }
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: isSel ? NSColor.alternateSelectedControlTextColor : NSColor.secondaryLabelColor,
+                .foregroundColor: lit ? NSColor.alternateSelectedControlTextColor : isSel ? NSColor.labelColor : NSColor.secondaryLabelColor,
             ]
             let s = labels[i] as NSString
             let size = s.size(withAttributes: attrs)
@@ -444,7 +481,7 @@ final class TierBar: NSView {
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if let r = popOutRect, r.insetBy(dx: -4, dy: -4).contains(p) { onPopOut?(); return }
-        if let i = tabRects().firstIndex(where: { $0.contains(p) }), i != selected || reselects {
+        if let i = tabRects().firstIndex(where: { $0.contains(p) }), i != selected || reselects || dimmed {
             selected = i
             onSelect?(i)
         }
