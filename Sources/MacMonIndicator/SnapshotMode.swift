@@ -155,7 +155,8 @@ enum SnapshotMode {
         write(d.snapshotView(), appearance: appearance, background: bg, padding: 0, to: path)
     }
 
-    /// The menu showing a Mac mini's copy from 2 minutes ago (the demo history, as another Mac's).
+    /// The menu showing a Mac mini's copy from 20 minutes ago (the demo history, as another Mac's):
+    /// its charts end now, the last 20 minutes not synced yet.
     private static func renderOtherMac(history: HistoryStore, sample: Sample, procs: ProcSnapshot?,
                                        appearance: NSAppearance.Name, to path: String) {
         let d = Dashboard(history: history, latest: sample, hasBattery: true)
@@ -163,9 +164,9 @@ enum SnapshotMode {
         d.localProcesses = procs
         d.onOpenWindow = {}
         d.otherMacs = [.init(id: "mini", name: "Mac mini"), .init(id: "studio", name: "Mac Studio")]
-        d.macStatus = { _ in "2 min ago" }
+        d.macStatus = { _ in "20 min ago" }
         var copy = sample
-        copy.time = sample.time - 120
+        copy.time = sample.time - 1200
         d.show(.init(id: "mini", version: "", history: HistoryStore(copy: history.fileData()), latest: copy,
                      hasBattery: false, processes: procs, processNote: ""))
         let bg = appearance == .darkAqua ? NSColor(white: 0.2, alpha: 1) : NSColor(white: 0.96, alpha: 1)

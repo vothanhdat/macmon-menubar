@@ -116,9 +116,13 @@ final class ChartsView: NSView {
     var tier = 0 { didSet { contentChanged() } }
     var latest: Sample? { didSet { contentChanged() } }
     var history: HistoryStore? { didSet { contentChanged() } }
-    /// The time the charts end at: nil for now, or when another Mac's copy was made (OtherMacs.swift).
-    var asOf: TimeInterval? { didSet { contentChanged() } }
-    private var now: TimeInterval { asOf ?? Date().timeIntervalSince1970 }
+    /// For another Mac's charts: when its copy was made (OtherMacs.swift); nil for this Mac's.
+    /// Its charts still end now, like this Mac's, so switching Macs keeps every time in place. The
+    /// buckets after the copy's last one are grey and hatched ("not synced yet"), unlike gaps in
+    /// the data (that Mac was asleep or off), which stay empty.
+    var syncedUntil: TimeInterval? { didSet { contentChanged() } }
+    /// The charts always end at the current time, for every Mac.
+    private var now: TimeInterval { Date().timeIntervalSince1970 }
     var onHover: ((TimeInterval?) -> Void)?
     /// Called after a click zooms in or out; the view's height needs updating then.
     var onZoom: (() -> Void)?
@@ -201,6 +205,20 @@ final class ChartsView: NSView {
     private func contentChanged() {
         needsDisplay = true
         updateOverlay()
+    }
+
+    /// Another Mac's copy gets no new samples, but its charts still move on with the clock: called
+    /// with each of this Mac's samples (once a second while the charts show).
+    func timePassed() { contentChanged() }
+
+    /// The first bucket of tier `t`'s window that comes after the copy's last one (`syncedUntil`):
+    /// from 0 (the whole window is after it) to the bucket count (none is, as for this Mac).
+    static func firstUnsynced(tier t: Int, syncedUntil: TimeInterval?, now: TimeInterval) -> Int {
+        let tier = HistoryStore.tiers[t]
+        guard let syncedUntil else { return tier.capacity }
+        let start = (now / tier.bucket).rounded(.down) - Double(tier.capacity - 1)
+        let i = (syncedUntil / tier.bucket).rounded(.down) - start + 1
+        return Int(min(Double(tier.capacity), max(0, i)))
     }
 
     // MARK: - Geometry
@@ -295,6 +313,7 @@ final class ChartsView: NSView {
         // white backing under the bars, fading out toward the base, keeps the fills light; over a
         // light wallpaper it changes next to nothing. Windows have an opaque background and skip it.
         let lightMenu = enclosingMenuItem != nil && effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
+        let unsynced = Self.firstUnsynced(tier: tier, syncedUntil: syncedUntil, now: now)
 
         for c in cells() {
             let row = c.row, rect = c.chart
@@ -306,6 +325,11 @@ final class ChartsView: NSView {
             history.window(tier: tier, series: row.series, now: now, avg: &avgBuf, max: &maxBuf)
             if case .mirrored(let down) = row.shape {
                 history.window(tier: tier, series: down, now: now, avg: &avgBuf2, max: &maxBuf2)
+            }
+            // Nothing after the copy, not even a short hole filled from the bucket before it.
+            for i in unsynced..<cap {
+                avgBuf[i] = .nan; maxBuf[i] = .nan
+                if case .mirrored = row.shape { avgBuf2[i] = .nan; maxBuf2[i] = .nan }
             }
             var r = range(row)
             // Both halves of a mirrored chart (reads and writes, received and sent) share one
@@ -338,8 +362,12 @@ final class ChartsView: NSView {
             ctx.addPath(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil))
             ctx.clip()
             if lightMenu { bars(backing: true) }
+            // The tint shows where there is data, or could be; the part not synced yet is grey.
+            let syncX = unsynced == cap ? rect.maxX : ((rect.minX + CGFloat(unsynced) * bw) / px).rounded() * px
             ctx.setFillColor(row.color.withAlphaComponent(0.08).cgColor)
-            ctx.fill(rect)
+            ctx.fill(CGRect(x: rect.minX, y: rect.minY, width: syncX - rect.minX, height: rect.height))
+            let unsyncedRect = CGRect(x: syncX, y: rect.minY, width: rect.maxX - syncX, height: rect.height)
+            if unsynced < cap { drawUnsynced(ctx, unsyncedRect, px: px) }
 
             // Time gridlines, one device pixel wide, under the bars.
             ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.1).cgColor)
@@ -349,20 +377,21 @@ final class ChartsView: NSView {
 
             bars(backing: false)
 
-            // Warning limit as a dashed line, if it is inside the visible range.
-            if let limit, limit > r.lo, limit < r.hi {
+            // Warning limit as a dashed line, if it is inside the visible range (up to the part not synced yet).
+            if let limit, limit > r.lo, limit < r.hi, syncX > rect.minX {
                 let y = rect.maxY - CGFloat((limit - r.lo) / (r.hi - r.lo)) * rect.height
                 ctx.setStrokeColor(NSColor.systemRed.withAlphaComponent(0.55).cgColor)
                 ctx.setLineWidth(0.75)
                 ctx.setLineDash(phase: 0, lengths: [2, 2])
-                ctx.strokeLineSegments(between: [CGPoint(x: rect.minX, y: y), CGPoint(x: rect.maxX, y: y)])
+                ctx.strokeLineSegments(between: [CGPoint(x: rect.minX, y: y), CGPoint(x: syncX, y: y)])
                 ctx.setLineDash(phase: 0, lengths: [])
             }
 
             // Axis labels: smart-scaled charts don't start at zero, so they show what the top and
             // bottom mean. Charts whose scale follows the data or the Mac show it, as does a zoomed chart.
+            // None while all of the window is after another Mac's copy: there is nothing to scale.
             var top: String?, bottom: String?
-            if let fmt = row.axisLabel {
+            if let fmt = row.axisLabel, unsynced > 0 {
                 if r.dataMin.isFinite, r.dataMax.isFinite {
                     top = fmt(r.dataMax); bottom = fmt(r.dataMin)
                 } else if isZoomed || Self.labelsScale(row.scale) {
@@ -382,6 +411,10 @@ final class ChartsView: NSView {
                 bottomText = bottom
             }
             bottomLabels[row.id] = bottomText
+            if unsynced < cap {
+                let chip = values(row, now: now, thresholds: thresholds).chip.map { chipRect($0, in: rect) }
+                drawUnsyncedNote(ctx, in: unsyncedRect, avoiding: chip)
+            }
             let hoverLabels = offscreen && hoverChart == row.id ? hoverTimeLabels(c, now: now) : nil
             if let hoverLabels { drawTimeLabels(ctx, hoverLabels.axis) }
             ctx.restoreGState()
@@ -393,6 +426,43 @@ final class ChartsView: NSView {
                 if let cursor = hoverLabels?.cursor { drawCursorTime(cursor) }
             }
         }
+    }
+
+    /// The part of another Mac's chart after its copy: a neutral grey with faint diagonal hatching,
+    /// so it reads as "no data yet", not as a gap. The hatching is fixed to the view, so it doesn't
+    /// crawl as the part grows with the clock.
+    private func drawUnsynced(_ ctx: CGContext, _ r: CGRect, px: CGFloat) {
+        ctx.saveGState()
+        ctx.clip(to: r)
+        ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.05).cgColor)
+        ctx.fill(r)
+        ctx.setStrokeColor(NSColor.labelColor.withAlphaComponent(0.09).cgColor)
+        ctx.setLineWidth(1)
+        let step: CGFloat = 5
+        var x = (r.minX / step).rounded(.down) * step - r.height
+        var lines: [CGPoint] = []
+        while x < r.maxX {
+            lines += [CGPoint(x: x, y: r.maxY), CGPoint(x: x + r.height, y: r.minY)]
+            x += step
+        }
+        ctx.strokeLineSegments(between: lines)
+        // Its edge, where the copy ends.
+        ctx.setFillColor(NSColor.labelColor.withAlphaComponent(0.2).cgColor)
+        ctx.fill(CGRect(x: r.minX, y: r.minY, width: px, height: r.height))
+        ctx.restoreGState()
+    }
+
+    private static let unsyncedNote = "not synced yet"
+
+    /// "not synced yet" in the middle of that part, left of the value chip if they would touch;
+    /// left out where it doesn't fit.
+    private func drawUnsyncedNote(_ ctx: CGContext, in r: CGRect, avoiding chip: CGRect?) {
+        let w = ceil((Self.unsyncedNote as NSString).size(withAttributes: axisAttrs).width) + 4
+        guard r.height >= axisLabelH + 4 else { return }
+        var box = CGRect(x: r.midX - w / 2, y: (r.midY - axisLabelH / 2).rounded(), width: w, height: axisLabelH)
+        if let chip, box.insetBy(dx: -3, dy: 0).intersects(chip) { box.origin.x = chip.minX - 4 - w }
+        guard box.minX >= r.minX + 3, box.maxX <= r.maxX - 3 else { return }
+        drawTag(ctx, Self.unsyncedNote, in: box)
     }
 
     /// An axis label in the chart's top- or bottom-left corner.
@@ -573,7 +643,10 @@ final class ChartsView: NSView {
     /// Values at the hovered moment, or live.
     private func values(_ row: Row, now: TimeInterval, thresholds: Thresholds) -> Values {
         let value: (Series) -> Float, live: Sample?
-        if let h = hoverIndex, let history {
+        if let h = hoverIndex, h >= Self.firstUnsynced(tier: tier, syncedUntil: syncedUntil, now: now) {
+            value = { _ in .nan } // after another Mac's copy: nothing yet
+            live = nil
+        } else if let h = hoverIndex, let history {
             value = { history.value(tier: self.tier, series: $0, index: h, now: now) }
             live = nil
         } else {

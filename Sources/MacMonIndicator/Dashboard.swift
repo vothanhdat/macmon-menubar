@@ -84,7 +84,7 @@ final class Dashboard {
         shownMac = r.id
         shownVersion = r.version
         charts.history = r.history
-        charts.asOf = r.latest.time
+        charts.syncedUntil = r.latest.time
         charts.latest = r.latest
         shownBattery = r.hasBattery
         shownFans = r.latest.fanCount
@@ -97,7 +97,7 @@ final class Dashboard {
         shownMac = nil
         shownVersion = nil
         charts.history = localHistory
-        charts.asOf = nil
+        charts.syncedUntil = nil
         charts.latest = localLatest
         shownBattery = hasBattery
         shownFans = fanCount
@@ -138,7 +138,7 @@ final class Dashboard {
     /// What the range row says while the pointer isn't over the charts: "Now", or when another
     /// Mac's copy was made and how old it is ("10:15 · 40 min ago"; an older one: "2 days ago").
     private var restingTime: String {
-        guard let id = shownMac, let t = charts.asOf else { return "Now" }
+        guard let id = shownMac, let t = charts.syncedUntil else { return "Now" }
         let status = macStatus?(id) ?? ""
         let date = Date(timeIntervalSince1970: t)
         guard Calendar.current.isDateInToday(date) || status.isEmpty else { return status }
@@ -311,7 +311,8 @@ final class Dashboard {
                 loadSettings()
             }
         }
-        if shownMac == nil { charts.latest = sample }
+        // Another Mac's charts end now too, so they move on with the clock.
+        if shownMac == nil { charts.latest = sample } else { charts.timePassed() }
     }
 
     private func showTime(_ t: TimeInterval?) {

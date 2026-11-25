@@ -47,6 +47,25 @@ import Testing
         #expect(Sample(values: [:], time: t0).cpu.isNaN)
     }
 
+    /// Another Mac's charts end now, like this Mac's: the buckets after its copy's last one are the
+    /// part not synced yet.
+    @Test func unsyncedPartStartsAfterTheCopysLastBucket() {
+        let tier1m = 0, tier1h = 2, tier30d = 5
+        let cap1h = HistoryStore.tiers[tier1h].capacity
+        // This Mac's charts, and a copy from the bucket that is now: nothing is after it.
+        #expect(ChartsView.firstUnsynced(tier: tier1h, syncedUntil: nil, now: t0) == cap1h)
+        #expect(ChartsView.firstUnsynced(tier: tier1h, syncedUntil: t0, now: t0 + 5) == cap1h)
+        // 10 minutes ago on 1h (10 s buckets): the last 60 buckets. Partway through a bucket, that
+        // bucket still has the copy's data.
+        #expect(ChartsView.firstUnsynced(tier: tier1h, syncedUntil: t0, now: t0 + 600) == cap1h - 60)
+        #expect(ChartsView.firstUnsynced(tier: tier1h, syncedUntil: t0 + 9, now: t0 + 600) == cap1h - 60)
+        // Older than the whole 1m window; and on 30d one 2-hour bucket holds both times.
+        #expect(ChartsView.firstUnsynced(tier: tier1m, syncedUntil: t0, now: t0 + 600) == 0)
+        #expect(ChartsView.firstUnsynced(tier: tier30d, syncedUntil: t0, now: t0 + 600) == HistoryStore.tiers[tier30d].capacity)
+        // That Mac's clock is ahead of this one's: nothing is after its copy.
+        #expect(ChartsView.firstUnsynced(tier: tier1h, syncedUntil: t0 + 30, now: t0) == cap1h)
+    }
+
     @Test func historyCopyReadsTheSame() throws {
         let h = history()
         let copy = try #require(HistoryStore(copy: h.fileData()))
