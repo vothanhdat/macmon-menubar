@@ -23,7 +23,10 @@ _Screenshots use demo history and demo process names._
   The solid bar is the average, the faint bar is the peak, so short spikes stay visible. CPU, GPU,
   RAM and Temp bars blend into red as they near your warning limits, and values past a limit show
   in red. Hover to read values at any moment. **Click a chart** to see it alone at full width with its
-  scale; click again to go back. Chart height is adjustable.
+  scale; click again to go back. **Zoom in time** with the scroll wheel or a pinch over the charts, or
+  drag across a chart to zoom into that stretch: every chart follows, drawn with the finest buckets
+  kept for that time (the last hour of 24h at 10 s). Scroll sideways to move along; click the range
+  or double-tap with two fingers to see its whole window again. Chart height is adjustable.
 - **Top processes**: CPU, CPU time, RAM, disk and kernel time. By default you get the top 2 by each
   column (10 rows); click a column to see the top 10 by that column (click again to go back).
 - **Dashboard window**: click the window button next to "Now" in the menu (or **Open in Window**)
@@ -170,7 +173,8 @@ downloaded copy, link it yourself:
 
 Turn on **Settings → Other Macs → Share with my other Macs through iCloud Drive** on each of your
 Macs. A row of names then shows above the menu's charts, and in the window: **This Mac**, then the
-others. Click one to see its charts and top processes from its last copy. The range row says when
+others. Click one to see its charts and top processes from its last copy. Its charts end now, like
+this Mac's, with the time since that copy hatched grey (`not synced yet`). The range row says when
 that copy was made and how old it is (`10:15 · 40 min ago`), and hovering shows that Mac's times.
 **Process History** has the same Macs in a menu left of its ranges: pick one for its process
 history, from its last copy; the line under the table says when that copy was made.
